@@ -5,8 +5,9 @@ LABEL VERSION="4.5.9"
 LABEL CI_IGNORE="False"
 
 RUN apk add --no-cache ca-certificates git
-RUN git clone https://github.com/OHIF/Viewers.git /src
-
+RUN  git clone https://github.com/OHIF/Viewers.git /src && cd /src && \
+     git checkout d627dee3b234d867228f0da76f021509e9e80f1f
+     
 RUN yarn config set workspaces-experimental true
 
 WORKDIR /src
