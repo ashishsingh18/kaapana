@@ -4,7 +4,7 @@ from kaapana.operators.KaapanaBaseOperator import KaapanaBaseOperator, default_r
 
 class DeepMRSegOperator(KaapanaBaseOperator):
 
-    execution_timeout=timedelta(minutes=30),
+    execution_timeout=timedelta(minutes=30)
 
     def __init__(self,
                  dag,
