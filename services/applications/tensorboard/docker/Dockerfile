@@ -1,14 +1,15 @@
-FROM python:3
+FROM local-only/base-python-cpu:0.1.0
 
 LABEL IMAGE="tensorboard"
-LABEL VERSION="2.3.0"
+LABEL VERSION="2.8.0"
 LABEL CI_IGNORE="False"
-
-RUN pip3 install tensorboard==2.3.0
-
-COPY files/tensorboard.sh /
 
 ENV INGRESS_PATH /tensorboard
 ENV LOG_DIR=/data
 
-CMD ["/bin/bash", "/tensorboard.sh"]
+COPY files/requirements.txt /src/requirements.txt
+RUN pip3 install --no-cache-dir -r /src/requirements.txt
+
+COPY files/tensorboard.sh /
+
+CMD ["/bin/sh", "/tensorboard.sh"]

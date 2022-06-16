@@ -7,9 +7,7 @@ LABEL CI_IGNORE="False"
 
 WORKDIR /
 
-RUN pip install --upgrade pip
 COPY files/requirements.txt /requirements.txt
-
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir /error-server

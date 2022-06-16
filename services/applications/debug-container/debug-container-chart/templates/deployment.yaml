@@ -1,0 +1,26 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: debug-container
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app-name: debug-container
+  template:
+    metadata:
+      labels:
+        app-name: debug-container
+    spec:
+      containers:
+      - name: debug
+        image: {{ .Values.global.registry_url }}/debug-container:{{ .Values.global.platform_abbr | default "uk" }}_{{ .Values.global.platform_version | default "0" }}__0.1.1
+        imagePullPolicy: {{ .Values.global.pull_policy_pods }}
+        ports:
+        - name: debug-http
+          containerPort: 5000
+      imagePullSecrets:
+      - name: registry-secret
+

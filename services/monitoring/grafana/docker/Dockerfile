@@ -1,5 +1,5 @@
-FROM grafana/grafana:6.4.4
+FROM grafana/grafana:8.4.4
 
 LABEL IMAGE="grafana"
-LABEL VERSION="6.4.4"
+LABEL VERSION="8.4.4"
 LABEL CI_IGNORE="False"
