@@ -1,26 +1,26 @@
 FROM ubuntu:20.04 as build
 
 LABEL IMAGE="ctp"
-LABEL VERSION="0.1.2-vdev"
+LABEL VERSION="0.1.3"
 LABEL CI_IGNORE="False"
 
 ENV TZ=Europe/Berlin
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openjdk-8-jdk \
-    ant
+    ant \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build-ctp
 
-RUN git clone -n https://github.com/johnperry/CTP.git .
-#current "tested" tag
-RUN git checkout 760aebfd8280d01b408d6a68138a6eba57cf87b0
+RUN git clone -n https://github.com/johnperry/CTP.git . && git checkout acaf7a6902a6bace4e3416a7cdb99ac031cbe0a4
 
 ADD /files/Runner.java ./source/java/org/rsna/runner/
-#error in file comment
-ADD /files/DICOMECGProcessor.java ./source/java/org/rsna/ctp/stdstages/anonymizer/dicom/
+# added consolelogs, to directly view logs in kubernetes logs
+ADD /files/log4j.properties ./source/files/
+
 
 # use java 8 for correct build process
 ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk-amd64 
@@ -32,10 +32,6 @@ ADD /files/kaapana-dag-trigger ./build/kaapana-dag-trigger
 RUN cd ./build/kaapana-dag-trigger \
   && ant -buildfile build.xml
 
-ADD /files/ctp_api_pseudonymization ./build/ctp_api_pseudonymization
-RUN cd ./build/ctp_api_pseudonymization \
-  && ant -buildfile build.xml
-
 #############################################################################################
 ###############################           2nd STAGE           ###############################
 #############################################################################################
@@ -44,7 +40,7 @@ RUN cd ./build/ctp_api_pseudonymization \
 FROM ubuntu:20.04
 
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     default-jre \
  && rm -rf /var/lib/apt/lists/*
 

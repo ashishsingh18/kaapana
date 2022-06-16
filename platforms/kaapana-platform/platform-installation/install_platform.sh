@@ -1,50 +1,78 @@
 #!/bin/bash
 set -euf -o pipefail
-
+export HELM_EXPERIMENTAL_OCI=1
 # if unusual home dir of user: sudo dpkg-reconfigure apparmor
 
+######################################################
+# Main platform configuration
+######################################################
+
 PROJECT_NAME="kaapana-platform-chart" # name of the platform Helm chart
-DEFAULT_VERSION="0.1.1-vdev"    # version of the platform Helm chart
+PROJECT_ABBR="kp" # abbrevention for the platform-name
+DEFAULT_VERSION="0.1.4"    # version of the platform Helm chart
+
+CONTAINER_REGISTRY_URL="" # empty for local build or registry-url like 'dktk-jip-registry.dkfz.de/kaapana' or 'registry.hzdr.de/kaapana/kaapana'
+CONTAINER_REGISTRY_USERNAME=""
+CONTAINER_REGISTRY_PASSWORD=""
+
+######################################################
+# Installation configuration
+######################################################
 
 DEV_MODE="true" # dev-mode -> containers will always be re-downloaded after pod-restart
+DEV_PORTS="false"
+GPU_SUPPORT="false"
 
-CONTAINER_REGISTRY_URL=""                          # eg 'dktk-jip-registry.dkfz.de' -> URL for the Docker registry (has to be 'local' for build-mode 'local' and the username for build-mode 'dockerhub')
-CONTAINER_REGISTRY_PROJECT=""                      # eg '/kaapana' -> The slash (/) in front of the project is important!!
-                                                   # Project of the Docker registry (not all have seperated projects then it shuould be empty-> '')
-                                                   # For build-mode 'local' and 'dockerhub' this should also be empty 
+HELM_NAMESPACE="kaapana"
+PREFETCH_EXTENSIONS="false"
+CHART_PATH=""
+NO_HOOKS=""
 
-CHART_REGISTRY_URL="" # Leave this empty if charts were pushed to docker registry, if you use a chart repo specify the url of chart repository # eg https://xx.xx.xx.xx/chartrepo 
-CHART_REGISTRY_PROJECT=""  # Leave this empty if charts were pushed to docker registry, if you use a chart repo specify the project name for the Helm charts
+######################################################
+# Individual platform configuration
+######################################################
+
+CREDENTIALS_MINIO_USERNAME="kaapanaminio"
+CREDENTIALS_MINIO_PASSWORD="Kaapana2020"
+
+GRAFANA_USERNAME="admin"
+GRAFANA_PASSWORD="admin"
+
+KEYCLOAK_ADMIN_USERNAME="admin"
+KEYCLOAK_ADMIN_PASSWORD="Kaapana2020"
 
 FAST_DATA_DIR="/home/kaapana" # Directory on the server, where stateful application-data will be stored (databases, processing tmp data etc.)
 SLOW_DATA_DIR="/home/kaapana" # Directory on the server, where the DICOM images will be stored (can be slower)
 
-HTTP_PORT=80      # not working yet -> has to be 80
-HTTPS_PORT=443    # not working yet -> has to be 443
-DICOM_PORT=11112  # configure DICOM receiver port
+HTTP_PORT="80"      # -> has to be 80
+HTTPS_PORT="443"    # HTTPS port
+DICOM_PORT="11112"  # configure DICOM receiver port
 
-PULL_POLICY_PODS="IfNotPresent"
-PULL_POLICY_JOBS="IfNotPresent"
-PULL_POLICY_OPERATORS="IfNotPresent"
 
-DEV_PORTS="false"
-GPU_SUPPORT="false"
+INSTANCE_NAME="central"
 
-if [ "$DEV_MODE" == "true" ]; then
-    PULL_POLICY_PODS="Always"
-    PULL_POLICY_JOBS="Always"
-    PULL_POLICY_OPERATORS="Always"
-fi
+######################################################
 
 if [ -z ${http_proxy+x} ] || [ -z ${https_proxy+x} ]; then
     http_proxy=""
     https_proxy=""
 fi
 
-CHART_PATH=""
-declare -a NEEDED_REPOS=("$CHART_REGISTRY_PROJECT")
 script_name=`basename "$0"`
 
+# set default values for the colors
+BOLD=""
+underline=""
+standout=""
+NC=""
+BLACK=""
+RED=""
+GREEN=""
+YELLOW=""
+BLUE=""
+MAGENTA=""
+CYAN=""
+WHITE=""
 # check if stdout is a terminal...
 if test -t 1; then
     # see if it supports colors...
@@ -66,62 +94,35 @@ if test -t 1; then
     fi
 fi
 
-function import_containerd {
-    echo "Starting image import into containerd..."
+if ! command -v nvidia-smi &> /dev/null
+then
+    echo "${YELLOW}No GPU detected...${NC}"
+    GPU_SUPPORT="false"
+else
+    echo "${GREEN}Nvidia GPU detected!${NC}"
+    GPU_SUPPORT="true"
+fi
+
+function delete_all_images_docker {
     while true; do
-        read -e -p "Should all locally built Docker containers be deleted after the import?" -i " no" yn
+        read -e -p "Do you really want to remove all the Docker images from the system?" -i " no" yn
         case $yn in
-            [Yy]* ) echo -e "${GREEN}Local containers will be removed from Docker after the upload to microk8s${NC}" && DEL_CONTAINERS="true"; break;;
-            [Nn]* ) echo -e "${YELLOW}Containers will be kept${NC}" && DEL_CONTAINERS="false"; break;;
+            [Yy]* ) echo "${GREEN}Removing all images...${NC}" && docker system prune --volumes --all && echo "${GREEN}Done.${NC}"; break;;
+            [Nn]* ) echo "${YELLOW}Images will be kept${NC}"; break;;
             * ) echo "Please answer yes or no.";;
         esac
     done
-    containerd_imgs=( $(microk8s ctr images ls -q) )
-    docker images --filter=reference="local/*" | tr -s ' ' | cut -d " " -f 1,2 | tr ' ' ':' | tail -n +2 | while read IMAGE; do
-        hash=$(docker images --no-trunc --quiet $IMAGE)
-        echo ""
-        if [[ " ${containerd_imgs[*]} " == *"$hash"* ]]; then
-            echo "Container $IMAGE already found: $hash"
-        else
-            echo "Not found: generating tar-file: '$IMAGE'"
-            docker save $IMAGE > ./image.tar
-            if [ $? -eq 0 ]; then
-                echo "ok"
-            else
-                echo "Failed!"
-                exit 1
-            fi
-            echo "Import image into containerd..."
-            microk8s ctr image import image.tar
-            if [ $? -eq 0 ]; then
-                echo "ok"
-            else
-                echo "Failed!"
-                exit 1
-            fi
-            echo "Remove tmp image.tar file..."
-            rm image.tar
-            if [ $? -eq 0 ]; then
-                echo "ok"
-            else
-                echo "Failed!"
-                exit 1
-            fi
-        fi
+}
 
-        if [ "$DEL_CONTAINERS" = "true" ];then
-            echo -e "Deleting Docker-image: $IMAGE"
-            docker rmi $IMAGE
-            echo "deleted."
-        fi
+function delete_all_images_microk8s {
+    while true; do
+        read -e -p "Do you really want to remove all the container images from Microk8s?" -i " no" yn
+        case $yn in
+            [Yy]* ) echo "${GREEN}Removing all images...${NC}" && microk8s.ctr images ls | awk {'print $1'} | xargs microk8s.ctr images rm && echo "${GREEN}Done.${NC}"; break;;
+            [Nn]* ) echo "${YELLOW}Images will be kept${NC}"; break;;
+            * ) echo "Please answer yes or no.";;
+        esac
     done
-
-    if [ "$DEL_CONTAINERS" = "true" ];then
-        echo -e "Deleting all remaining Docker-images..."
-        docker system prune --all --force
-        echo "done"
-    fi
-    echo "All images successfully imported!"
 }
 
 function get_domain {
@@ -155,7 +156,7 @@ function get_domain {
 
 function delete_deployment {
     echo -e "${YELLOW}Uninstalling releases${NC}"
-    helm ls --reverse -A | awk 'NR > 1 { print  "-n "$2, $1}' | xargs -L1 helm delete
+    helm -n $HELM_NAMESPACE ls --deployed --failed --pending --superseded --uninstalling --date --reverse | awk 'NR > 1 { print  "-n "$2, $1}' | xargs -L1 -I % sh -c "helm -n $HELM_NAMESPACE uninstall ${NO_HOOKS} --wait --timeout 5m30s %; sleep 2"
     echo -e "${YELLOW}Waiting until everything is terminated...${NC}"
     WAIT_UNINSTALL_COUNT=100
     for idx in $(seq 0 $WAIT_UNINSTALL_COUNT)
@@ -168,222 +169,215 @@ function delete_deployment {
             break
         fi
     done
+    
+    echo -e "${YELLOW}Removing namespace kaapana...${NC}"
+    microk8s.kubectl delete namespace kaapana --ignore-not-found=true
 
     if [ "$idx" -eq "$WAIT_UNINSTALL_COUNT" ]; then
         echo "${RED}Something went wrong while uninstalling please check manually if there are still namespaces or pods floating around. Everything must be delete before the installation:${NC}"
         echo "${RED}kubectl get pods -A${NC}"
         echo "${RED}kubectl get namespaces${NC}"
-        echo "${RED}Once everything is delete you can reinstall the platform!${NC}"
+        echo "${RED}Once everything is deleted you can reinstall the platform!${NC}"
         exit 1
     fi
-    
-    if [ ! -z "$CHART_REGISTRY_URL" ]; then
-        delete_helm_repos
-    fi
+
+
     echo -e "${GREEN}####################################  UNINSTALLATION DONE  ############################################${NC}"
 }
 
-function update_extensions {
-    echo -e "${GREEN}Downloading all kaapanaworkflows, kaapanaapplications and kaapanaint to $HOME/.extensions${NC}"
-    set +euf
-    updates_output=$(helm repo update)
-    set -euf
-
-    if echo "$updates_output" | grep -q 'failed to'; then
-        echo -e "${RED}Update failed!${NC}"
-        echo -e "${RED}You seem to have no internet connection!${NC}"
-        echo "$updates_output"
-        exit 1
-    else
-        mkdir -p $HOME/.extensions
-        find $HOME/.extensions/ -type f -delete
-        set +euf
-        helm search repo --devel -l -r '(kaapanaworkflow|kaapanaapplication|kaapanaint)' -o json | jq -r '.[] | "\(.name) --version \(.version)"' | xargs -L1 helm pull -d $HOME/.extensions/
-        set -euf
-        echo -e "${GREEN}Update OK!${NC}"
-    fi
+function clean_up_kubernetes {
+    echo "${YELLOW}Deleting all deployments ${NC}"
+    microk8s.kubectl delete deployments --all
+    echo "${YELLOW}Deleting all jobs${NC}"
+    microk8s.kubectl delete jobs --all
 }
 
-function shell_update_extensions {
-
-    if [ ! "$QUIET" = "true" ];then
-        echo -e "${YELLOW}Which pull-docker-chart version should be used? ${NC}";
-        echo -e "${YELLOW}If you have no idea, press enter and accept the default. ${NC}";
-        read -e -p "${YELLOW}version: ${NC}" -i $DEFAULT_VERSION chart_version;
-    else
-        chart_version=$DEFAULT_VERSION
-    fi
-    update_extensions
-    helm pull -d $HOME/.extensions/ --version=$chart_version $CHART_REGISTRY_PROJECT/pull-docker-chart
+function upload_tar {
+    echo "${YELLOW}Importing the images fromt the tar, this might take up to one hour...!${NC}"
+    microk8s.ctr images import $TAR_PATH
+    echo "${GREEN}Finished image uplaod! You should now be able to install the platfrom by specifying the chart path.${NC}"
 }
 
 function install_chart {
-    if [ ! -z "$CHART_REGISTRY_URL" ]; then
-        add_helm_repos
-    fi
-
-    if [ ! -z "$CHART_PATH" ]; then
-        CHART_REGISTRY_URL="local"
-        CHART_REGISTRY_PROJECT="local"
-    fi
 
     if [ -z "$CONTAINER_REGISTRY_URL" ]; then
-        echo 'CHART_REGISTRY_URL, CHART_REGISTRY_PROJECT, CONTAINER_REGISTRY_URL, CONTAINER_REGISTRY_PROJECT need to be set! -> please adjust the install_platform.sh script!'        
-        echo 'ABORT'
+        echo "${RED}CONTAINER_REGISTRY_URL needs to be set! -> please adjust the install_platform.sh script!${NC}"
+        echo "${RED}ABORT${NC}"
         exit 1
     fi
-    
-    if [ ! "$CONTAINER_REGISTRY_URL" = "local" ];then
-        check_credentials
-    else
-        REGISTRY_USERNAME=""
-        REGISTRY_PASSWORD=""
-        import_containerd
-    fi
 
-    if [ ! "$QUIET" = "true" ];then
-        while true; do
-            read -e -p "Enable GPU support?" -i " no" yn
-            case $yn in
-                [Yy]* ) echo -e "${GREEN}ENABLING GPU SUPPORT${NC}" && GPU_SUPPORT="true"; break;;
-                [Nn]* ) echo -e "${YELLOW}SET NO GPU SUPPORT${NC}" && GPU_SUPPORT="false"; break;;
-                * ) echo "Please answer yes or no.";;
-            esac
-        done
-    else
-        echo -e "${YELLOW}QUIET-MODE active!${NC}"
-    fi
-    echo -e "${YELLOW}GPU_SUPPORT: $GPU_SUPPORT ${NC}"
-    get_domain
-    if [ ! "$QUIET" = "true" ];then
+
+    if [ ! "$QUIET" = "true" ] && [ -z "$CHART_PATH" ];then
         echo -e ""
         read -e -p "${YELLOW}Which $PROJECT_NAME version do you want to install?: ${NC}" -i $DEFAULT_VERSION chart_version;
     else
         chart_version=$DEFAULT_VERSION
     fi
 
-    if [ -z "$CHART_REGISTRY_URL" ] && [ -z "$CHART_REGISTRY_PROJECT" ]; then
-        export HELM_EXPERIMENTAL_OCI=1
-        helm registry login -u $REGISTRY_USERNAME -p $REGISTRY_PASSWORD ${CONTAINER_REGISTRY_URL}
-        helm chart pull ${CONTAINER_REGISTRY_URL}${CONTAINER_REGISTRY_PROJECT}/$PROJECT_NAME:$chart_version
-        helm chart export ${CONTAINER_REGISTRY_URL}${CONTAINER_REGISTRY_PROJECT}/$PROJECT_NAME:$chart_version -d $HOME/
-        CHART_PATH=$PROJECT_NAME
+    if [ "$GPU_SUPPORT" = "true" ];then
+        echo -e "${GREEN} -> GPU found ...${NC}"
+    else
+        if [ ! "$QUIET" = "true" ];then
+            while true; do
+                read -e -p "No Nvidia GPU detected - Enable GPU support anyway?" -i " no" yn
+                case $yn in
+                    [Yy]* ) echo -e "${GREEN}ENABLING GPU SUPPORT${NC}" && GPU_SUPPORT="true"; break;;
+                    [Nn]* ) echo -e "${YELLOW}SET NO GPU SUPPORT${NC}" && GPU_SUPPORT="false"; break;;
+                    * ) echo "Please answer yes or no.";;
+                esac
+            done
+        else
+            echo -e "${YELLOW}QUIET-MODE active!${NC}"
+        fi
     fi
 
+    echo -e "${YELLOW}GPU_SUPPORT: $GPU_SUPPORT ${NC}"
+    if [ "$GPU_SUPPORT" = "true" ];then
+        echo -e "-> enabling GPU in Microk8s ..."
+        if [[ $deployments == *"gpu-operator"* ]];then
+            echo -e "-> gpu-operator chart already exists"
+        else
+            microk8s.enable gpu
+        fi
+    fi
+    get_domain
+    
     if [ ! -z "$CHART_PATH" ]; then
-        echo -e "${YELLOW}Installing $PROJECT_NAME: version $chart_version${NC}"
-        echo -e "${YELLOW}Chart-tgz-path $CHART_PATH${NC}"
-        helm install $CHART_PATH \
-        --set global.version="$chart_version" \
-        --set global.hostname="$DOMAIN" \
-        --set global.dev_ports="$DEV_PORTS" \
-        --set global.dev_mode="$DEV_MODE" \
-        --set global.dicom_port="$DICOM_PORT" \
-        --set global.http_port="$HTTP_PORT" \
-        --set global.https_port="$HTTPS_PORT" \
-        --set global.fast_data_dir="$FAST_DATA_DIR" \
-        --set global.slow_data_dir="$SLOW_DATA_DIR" \
-        --set global.home_dir="$HOME" \
-        --set global.pull_policy_jobs="$PULL_POLICY_JOBS" \
-        --set global.pull_policy_operators="$PULL_POLICY_OPERATORS" \
-        --set global.pull_policy_pods="$PULL_POLICY_PODS" \
-        --set global.credentials.registry_username="$REGISTRY_USERNAME" \
-        --set global.credentials.registry_password="$REGISTRY_PASSWORD" \
-        --set global.gpu_support=$GPU_SUPPORT \
-        --set global.http_proxy=$http_proxy \
-        --set global.https_proxy=$https_proxy \
-        --set global.registry_url=$CONTAINER_REGISTRY_URL \
-        --set global.registry_project=$CONTAINER_REGISTRY_PROJECT \
-        --set global.chart_registry_project=$CHART_REGISTRY_PROJECT \
-        --name-template $PROJECT_NAME
+        echo -e "${YELLOW}Please note, since you have specified a chart file, you install the platform in OFFLINE_MODE='true'.${NC}"
+        echo -e "${YELLOW}We assume that that all images are already presented inside the microk8s.${NC}"
+        echo -e "${YELLOW}Images are uploaded either with a previous installation from a docker registry or uploaded from a tar or directly uploaded during building the platform.${NC}"
+
+        if [ $(basename "$CHART_PATH") != "$PROJECT_NAME-$DEFAULT_VERSION.tgz" ]; then
+            echo "${RED} Verison of chart_path $CHART_PATH differs from PROJECT_NAME: $PROJECT_NAME and DEFAULT_VERSION: $DEFAULT_VERSION in the installer script.${NC}" 
+            exit 1
+        fi
+
+        while true; do
+        echo -e "${YELLOW}You are installing the platform in offline mode!${NC}"
+            read -p "${YELLOW}Please confirm that you are sure that all images are present in microk8s (yes/no): ${NC}" yn
+                case $yn in
+                    [Yy]* ) break;;
+                    [Nn]* ) exit;;
+                    * ) echo "Please answer yes or no.";;
+                esac
+        done
+
+        OFFLINE_MODE="true"
+        DEV_MODE="false"
+        PULL_POLICY_PODS="IfNotPresent"
+        PULL_POLICY_JOBS="IfNotPresent"
+        PULL_POLICY_OPERATORS="IfNotPresent"
+        PREFETCH_EXTENSIONS="false"
+
+        CONTAINER_REGISTRY_USERNAME=""
+        CONTAINER_REGISTRY_PASSWORD=""
     else
-        #update_extensions
-        helm pull -d $HOME/.extensions/ --version=$chart_version $CHART_REGISTRY_PROJECT/pull-docker-chart
-        echo -e "${YELLOW}Installing $CHART_REGISTRY_PROJECT/$PROJECT_NAME version: $chart_version${NC}"
-        helm install --devel --version $chart_version  $CHART_REGISTRY_PROJECT/$PROJECT_NAME \
-        --set global.version="$chart_version" \
-        --set global.hostname="$DOMAIN" \
-        --set global.dev_ports="$DEV_PORTS" \
-        --set global.dev_mode="$DEV_MODE" \
-        --set global.dicom_port="$DICOM_PORT" \
-        --set global.http_port="$HTTP_PORT" \
-        --set global.https_port="$HTTPS_PORT" \
-        --set global.fast_data_dir="$FAST_DATA_DIR" \
-        --set global.slow_data_dir="$SLOW_DATA_DIR" \
-        --set global.home_dir="$HOME" \
-        --set global.pull_policy_jobs="$PULL_POLICY_JOBS" \
-        --set global.pull_policy_operators="$PULL_POLICY_OPERATORS" \
-        --set global.pull_policy_pods="$PULL_POLICY_PODS" \
-        --set global.credentials.registry_username="$REGISTRY_USERNAME" \
-        --set global.credentials.registry_password="$REGISTRY_PASSWORD" \
-        --set global.gpu_support=$GPU_SUPPORT \
-        --set global.http_proxy=$http_proxy \
-        --set global.https_proxy=$https_proxy \
-        --set global.registry_url=$CONTAINER_REGISTRY_URL \
-        --set global.registry_project=$CONTAINER_REGISTRY_PROJECT \
-        --set global.chart_registry_project=$CHART_REGISTRY_PROJECT \
-        --name-template $PROJECT_NAME
+        OFFLINE_MODE="false"
+        PULL_POLICY_PODS="IfNotPresent"
+        PULL_POLICY_JOBS="IfNotPresent"
+        PULL_POLICY_OPERATORS="IfNotPresent"
+
+        if [ "$DEV_MODE" == "true" ]; then
+            PULL_POLICY_PODS="Always"
+            PULL_POLICY_JOBS="Always"
+            PULL_POLICY_OPERATORS="Always"
+        fi
+
+        echo "${YELLOW}Helm login registry...${NC}"
+        check_credentials
+        echo "${GREEN}Pulling platform chart from registry...${NC}"
+        pull_chart
+        SCRIPTPATH=$(dirname "$(realpath $0)")
+        CHART_PATH="$SCRIPTPATH/$PROJECT_NAME-$chart_version.tgz"
     fi
 
-    if [ -z "$CHART_REGISTRY_URL" ] && [ -z "$CHART_REGISTRY_PROJECT" ]; then
-        rm -r $CHART_PATH
+    echo "${GREEN}Installing $PROJECT_NAME:$chart_version${NC}"
+    echo "${GREEN}CHART_PATH $CHART_PATH${NC}"
+    helm -n $HELM_NAMESPACE install --create-namespace $CHART_PATH \
+    --set-string global.base_namespace="base" \
+    --set-string global.core_namespace="kube-system" \
+    --set-string global.credentials_registry_username="$CONTAINER_REGISTRY_USERNAME" \
+    --set-string global.credentials_registry_password="$CONTAINER_REGISTRY_PASSWORD" \
+    --set-string global.credentials_minio_username="$CREDENTIALS_MINIO_USERNAME" \
+    --set-string global.credentials_minio_password="$CREDENTIALS_MINIO_PASSWORD" \
+    --set-string global.credentials_grafana_username="$GRAFANA_USERNAME" \
+    --set-string global.credentials_grafana_password="$GRAFANA_PASSWORD" \
+    --set-string global.credentials_keycloak_admin_username="$KEYCLOAK_ADMIN_USERNAME" \
+    --set-string global.credentials_keycloak_admin_password="$KEYCLOAK_ADMIN_PASSWORD" \
+    --set-string global.dev_ports="$DEV_PORTS" \
+    --set-string global.dicom_port="$DICOM_PORT" \
+    --set-string global.fast_data_dir="$FAST_DATA_DIR" \
+    --set-string global.flow_namespace="flow" \
+    --set-string global.flow_jobs_namespace="flow-jobs" \
+    --set-string global.gpu_support="$GPU_SUPPORT" \
+    --set-string global.helm_namespace="$HELM_NAMESPACE" \
+    --set-string global.home_dir="$HOME" \
+    --set-string global.hostname="$DOMAIN" \
+    --set-string global.http_port="$HTTP_PORT" \
+    --set-string global.http_proxy="$http_proxy" \
+    --set-string global.https_port="$HTTPS_PORT" \
+    --set-string global.https_proxy="$https_proxy" \
+    --set-string global.kaapana_collections[0].name="kaapana-extension-collection" \
+    --set-string global.kaapana_collections[0].version="0.1.0" \
+    --set-string global.monitoring_namespace="monitoring" \
+    --set-string global.meta_namespace="meta" \
+    --set-string global.offline_mode="$OFFLINE_MODE" \
+    --set-string global.platform_abbr="$PROJECT_ABBR" \
+    --set-string global.platform_version="$chart_version" \
+    --set-string global.prefetch_extensions="$PREFETCH_EXTENSIONS" \
+    --set-string global.preinstall_extensions[0].name="code-server-chart" \
+    --set-string global.preinstall_extensions[0].version="4.2.0" \
+    --set-string global.preinstall_extensions[1].name="kaapana-plugin-chart" \
+    --set-string global.preinstall_extensions[1].version="0.1.1" \
+    --set-string global.pull_policy_jobs="$PULL_POLICY_JOBS" \
+    --set-string global.pull_policy_operators="$PULL_POLICY_OPERATORS" \
+    --set-string global.pull_policy_pods="$PULL_POLICY_PODS" \
+    --set-string global.registry_url="$CONTAINER_REGISTRY_URL" \
+    --set-string global.release_name="$PROJECT_NAME" \
+    --set-string global.slow_data_dir="$SLOW_DATA_DIR" \
+    --set-string global.store_namespace="store" \
+    --set-string global.version="$chart_version" \
+    --set-string global.instance_name="$INSTANCE_NAME" \
+    --name-template "$PROJECT_NAME"
+
+    if [ ! -z "$CONTAINER_REGISTRY_USERNAME" ] && [ ! -z "$CONTAINER_REGISTRY_PASSWORD" ]; then
+        rm $CHART_PATH
     fi
 
-    
     print_installation_done
     
-    REGISTRY_USERNAME=""
-    REGISTRY_PASSWORD=""
+    CONTAINER_REGISTRY_USERNAME=""
+    CONTAINER_REGISTRY_PASSWORD=""
 }
 
 
-function upgrade_chart {
-    if [ ! "$QUIET" = "true" ];then
-        read -e -p "${YELLOW}Which version should be deployed?: ${NC}" -i $DEFAULT_VERSION chart_version;
-    else
-        chart_version=$DEFAULT_VERSION
-    fi
-
-    echo "${YELLOW}Upgrading release: $CHART_REGISTRY_PROJECT/$PROJECT_NAME${NC}"
-    echo "${YELLOW}version: $chart_version${NC}"
-
-    helm upgrade $PROJECT_NAME $CHART_REGISTRY_PROJECT/$PROJECT_NAME --devel --version $chart_version --set global.version="$chart_version" --reuse-values 
-    print_installation_done
+function pull_chart {
+    for i in 1 2 3 4 5;
+    do
+        echo -e "${YELLOW}Pulling chart: ${CONTAINER_REGISTRY_URL}/$PROJECT_NAME with version $chart_version ${NC}"
+        helm pull oci://${CONTAINER_REGISTRY_URL}/$PROJECT_NAME --version $chart_version \
+            && break \
+            || ( echo -e "${RED}Failed -> retry${NC}" && sleep 1 );
+        
+        if [ $i -eq 5 ];then
+            echo -e "${RED}Could not pull chart! -> abort${NC}"
+            exit 1
+        fi 
+    done
 }
-
 
 function check_credentials {
     while true; do
-        if [ ! -v REGISTRY_USERNAME ] || [ ! -v REGISTRY_PASSWORD ]; then
+        if [ -z "$CONTAINER_REGISTRY_USERNAME" ] || [ -z "$CONTAINER_REGISTRY_PASSWORD" ]; then
             echo -e "${YELLOW}Please enter the credentials for the Container-Registry!${NC}"
-            read -p '**** username: ' REGISTRY_USERNAME
-            read -s -p '**** password: ' REGISTRY_PASSWORD
+            read -p '**** username: ' CONTAINER_REGISTRY_USERNAME
+            read -s -p '**** password: ' CONTAINER_REGISTRY_PASSWORD
         else
             echo -e "${GREEN}Credentials found!${NC}"
             break
         fi
     done
-}
-
-function add_helm_repos {
-    echo -e "Adding needed helm projects..."
-    for i in "${NEEDED_REPOS[@]}"
-    do
-        echo -e "${YELLOW}Adding project $i.${NC}"
-        helm repo add $i $CHART_REGISTRY_URL/$i
-    done
-
-    helm repo update
-}
-
-function delete_helm_repos {
-    # helm repo ls |cut -f 1  | tail -n +2 | xargs -L1 helm repo rm # delete all repos
-    echo -e "Deleting needed helm projects..."
-    for i in "${NEEDED_REPOS[@]}"
-    do
-        echo -e "${YELLOW}Deleting project $i.${NC}"
-        helm repo remove $i
-    done
+    helm registry login -u $CONTAINER_REGISTRY_USERNAME -p $CONTAINER_REGISTRY_PASSWORD ${CONTAINER_REGISTRY_URL}
 }
 
 function install_certs {
@@ -416,47 +410,23 @@ function install_certs {
         echo -e "Creating cluster secret ..."
         microk8s.kubectl delete secret certificate -n kube-system
         microk8s.kubectl create secret tls certificate --namespace kube-system --key ./tls.key --cert ./tls.crt
-        gatekeeper_pod=$(microk8s.kubectl get pods -n kube-system |grep louketo  | awk '{print $1;}')
-        echo "gatekeeper pod: $gatekeeper_pod"
-        microk8s.kubectl -n kube-system delete pod $gatekeeper_pod
+        auth_proxy_pod=$(microk8s.kubectl get pods -n kube-system |grep oauth2-proxy  | awk '{print $1;}')
+        echo "auth_proxy_pod pod: $auth_proxy_pod"
+        microk8s.kubectl -n kube-system delete pod $auth_proxy_pod
     fi
 
     echo -e "${GREEN}DONE${NC}"
-}
-
-function prefetch_extensions {
-
-    helm repo update
-    
-    if [ ! "$QUIET" = "true" ];then
-        read -e -p "${YELLOW}Which prefetch-extensions-chart version should be use? If you have no idea, press enter and accept the default: ${NC}" -i $DEFAULT_VERSION chart_version;
-    else
-        chart_version=$DEFAULT_VERSION
-    fi
-    echo -e "Prefetching all extension docker container"
-    release_name=prefetch-extensions-chart-$(echo $(uuidgen --hex) | cut -c1-10)
-    helm install --devel --version $chart_version $CHART_REGISTRY_PROJECT/prefetch-extensions-chart \
-    --set global.pull_policy_jobs="$PULL_POLICY_JOBS" \
-    --set global.registry_url=$CONTAINER_REGISTRY_URL \
-    --set global.registry_project=$CONTAINER_REGISTRY_PROJECT \
-    --name-template $release_name \
-    --wait \
-    --atomic \
-    --timeout 60m0s
-    sleep 10
-    helm delete $release_name
-    echo -e "${GREEN}OK!${NC}"
 }
 
 function print_installation_done {
     echo -e "${GREEN}Installation finished."
     echo -e "Please wait till all components have been downloaded and started."
     echo -e "You can check the progress with:"
-    echo -e "watch microk8s.kubectl get pods --all-namespaces"
+    echo -e "watch microk8s.kubectl get pods -A"
     echo -e "When all pod are in the \"running\" or \"completed\" state,${NC}"
 
     if [ -v DOMAIN ];then
-        echo -e "${GREEN}you can visit: https://$DOMAIN/"
+        echo -e "${GREEN}you can visit: https://$DOMAIN:$HTTPS_PORT/"
         echo -e "You should be welcomed by the login page."
         echo -e "Initial credentials:"
         echo -e "username: kaapana"
@@ -487,21 +457,22 @@ fi;
 ### Parsing command line arguments:
 usage="$(basename "$0")
 
-_Flag: --prefetch-extensions prefetch containers needed for the extensions
-_Flag: --update-extensions Updates the extensions saved to ~/.extensions
-_Flag: --install-certs  set new HTTPS-certificates for the platform
+_Flag: --install-certs set new HTTPS-certificates for the platform
+_Flag: --remove-all-images-ctr will delete all images from Microk8s (containerd)
+_Flag: --remove-all-images-docker will delete all Docker images from the system
 _Flag: --quiet, meaning non-interactive operation
 
-_Argument: --chart-path [path-to-chart-tgz]
-
+_Argument: --version of the platform [version]
 _Argument: --username [Docker regsitry username]
 _Argument: --password [Docker regsitry password]
 _Argument: --port [Set main https-port]
+_Argument: --chart-path [path-to-chart-tgz]
+_Argument: --upload-tar [path-to-a-tarball]
 
 _Argument: --version [version]
 
 where version is one of the available platform releases:
-    0.1.0             --> latest Kaapana release
+    0.1.0  --> latest Kaapana release
     $DEFAULT_VERSION  --> latest development version ${NC}"
 
 QUIET=NA
@@ -519,15 +490,15 @@ do
         ;;
 
         -u|--username)
-            REGISTRY_USERNAME="$2"
-            echo -e "${GREEN}SET REGISTRY_USERNAME! $REGISTRY_USERNAME ${NC}";
+            CONTAINER_REGISTRY_USERNAME="$2"
+            echo -e "${GREEN}SET CONTAINER_REGISTRY_USERNAME! $CONTAINER_REGISTRY_USERNAME ${NC}";
             shift # past argument
             shift # past value
         ;;
 
         -p|--password)
-            REGISTRY_PASSWORD="$2"
-            echo -e "${GREEN}SET REGISTRY_PASSWORD!${NC}";
+            CONTAINER_REGISTRY_PASSWORD="$2"
+            echo -e "${GREEN}SET CONTAINER_REGISTRY_PASSWORD!${NC}";
             shift # past argument
             shift # past value
         ;;
@@ -546,6 +517,13 @@ do
             shift # past value
         ;;
 
+        --upload-tar)
+            TAR_PATH="$2"
+            echo -e "${GREEN}SET TAR_PATH: $TAR_PATH !${NC}";
+            upload_tar
+            exit 0
+        ;;
+
         --quiet)
             QUIET=true
             shift # past argument
@@ -556,15 +534,24 @@ do
             exit 0
         ;;
 
-        # --update-extensions)
-        #     shell_update_extensions
-        #     exit 0
-        # ;;
+        --remove-all-images-ctr)
+            delete_all_images_microk8s
+            exit 0
+        ;;
 
-        # --prefetch-extensions)
-        #     prefetch_extensions
-        #     exit 0
-        # ;;
+        --remove-all-images-docker)
+            delete_all_images_docker
+            exit 0
+        ;;
+
+        --purge-kube-and-helm)
+            echo -e "${YELLOW}Starting Uninstallation...${NC}"
+            NO_HOOKS="--no-hooks"
+            echo -e "${YELLOW}Using --no-hooks${NC}"
+            delete_deployment
+            clean_up_kubernetes
+            exit 0
+        ;;
 
         *)    # unknown option
             echo -e "${RED}unknow parameter: $key ${NC}"
@@ -583,39 +570,18 @@ else
     echo -e "${GREEN}ok${NC}"
 fi
 
-if [ ! -z "$CHART_REGISTRY_URL" ]; then
-    echo -e "${YELLOW}Update helm repos...${NC}"
-
-    set +euf
-    updates_output=$(helm repo update)
-    set -euf
-
-    if echo "$updates_output" | grep -q 'failed to'; then
-        echo -e "${RED}updates failed!${NC}"
-        echo "$updates_output"
-        exit 1
-    else
-        echo -e "${GREEN}updates ok${NC}" 
-    fi
-fi
-
 echo -e "${YELLOW}Get helm deployments...${NC}"
-deployments=$(helm ls |cut -f1 |tail -n +2)
+deployments=$(helm -n $HELM_NAMESPACE ls |cut -f1 |tail -n +2)
 echo "Current deployments: " 
 echo $deployments
 
 if [[ $deployments == *"$PROJECT_NAME"* ]] && [[ ! $QUIET = true ]];then
     echo -e "${YELLOW}$PROJECT_NAME already deployed!${NC}"
     PS3='select option: '
-    options=("Upgrade" "Re-install" "Uninstall" "Quit")
+    options=("Re-install" "Uninstall" "Quit")
     select opt in "${options[@]}"
     do
         case $opt in
-            "Upgrade")
-                echo -e "${YELLOW}Starting upgrade...${NC}"
-                upgrade_chart
-                break
-                ;;
             "Re-install")
                 echo -e "${YELLOW}Starting re-installation...${NC}"
                 delete_deployment

@@ -1,6 +1,7 @@
 ---
 apiVersion: v1
-appVersion: "0.1.1-vdev"
-description: kaapana Platform
+version: "0.1.4"
+appVersion: "0.1.4"
 name: kaapana-platform-chart
-version: "0.1.1-vdev"
+description: kaapana Platform
+kaapana_type: "platform"

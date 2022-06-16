@@ -1,6 +1,0 @@
----
-global:
-    pull_policy_jobs: ""
-image: "kaapana-plugin"
-version: "0.1.1-vdev"
-action: "copy"

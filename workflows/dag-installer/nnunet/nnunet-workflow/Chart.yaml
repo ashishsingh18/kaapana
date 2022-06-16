@@ -1,9 +1,0 @@
----
-apiVersion: v1
-appVersion: "1.6.5-vdev"
-description: nnUNet workflow for inference and training
-name: nnunet-workflow
-version: "1.6.5-vdev"
-keywords:
-- kaapanaworkflow
-- kaapanaexperimental

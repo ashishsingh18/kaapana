@@ -1,5 +1,0 @@
----
-dependencies:
-  - name: postgres-node
-    version: "9.6-vdev"
-    repository: file://deps/postgres-node

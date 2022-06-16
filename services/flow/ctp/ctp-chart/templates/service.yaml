@@ -2,40 +2,50 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: ctp-service
+  name: ctp-internal-service
   namespace: {{ .Values.global.flow_namespace }}
   labels:
     app-name: ctp
 spec:
   selector:
     app-name: ctp
-{{- if .Values.global.dicom_port }}
+  type: ClusterIP
+  ports:
+  - name: ctp-port
+    port: 80
+    targetPort: 1050
+    protocol: TCP
+  - name: ctp-http-port
+    port: {{ .Values.global.dicom_web_port | default "7777" }}
+    targetPort: 7777
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ctp-dicom-service
+  namespace: {{ .Values.global.flow_namespace }}
+  labels:
+    app-name: ctp
+spec:
+  selector:
+    app-name: ctp
+{{- if ne (.Values.global.dicom_port | default "11112") "0" }}
   type: NodePort
   externalTrafficPolicy: Local
   ports:
-  - name: ctp-port
-    port: 80
-    targetPort: 1050
-    protocol: TCP
   - name: ctp-dcm-port
     port: 11112
-    nodePort: {{ .Values.global.dicom_port }}
     targetPort: 11112
+    nodePort: {{ .Values.global.dicom_port }}
 {{- else }}
+  type: ClusterIP
   ports:
-  - name: ctp-port
-    port: 80
-    targetPort: 1050
-    protocol: TCP
   - name: ctp-dcm-port
     port: 11112
     targetPort: 11112
 {{- end }}
-  - name: ctp-http-port
-    port: {{ .Values.global.dicom_web_port }}
-    targetPort: 7777
 ---
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1 
 kind: Ingress
 metadata:
   name: ctp-ingress-ip
@@ -51,10 +61,17 @@ spec:
     http:
       paths:
       - path: /ctp
+        pathType: ImplementationSpecific
         backend:
-          serviceName: ctp-service
-          servicePort: 80
+          service:
+            name: ctp-internal-service
+            port:
+              number: 80
       - path: /dicomweb
+        pathType: ImplementationSpecific
         backend:
-          serviceName: ctp-service
-          servicePort: {{ .Values.global.dicom_web_port }}
+          service:
+            name: ctp-internal-service
+            port:
+              number: {{ .Values.global.dicom_web_port | default "7777"}}
+---
