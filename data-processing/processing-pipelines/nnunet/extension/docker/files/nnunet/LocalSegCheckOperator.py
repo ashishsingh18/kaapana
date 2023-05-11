@@ -11,11 +11,9 @@ from pathlib import Path
 from datetime import timedelta
 from multiprocessing.pool import ThreadPool
 from kaapana.operators.KaapanaPythonBaseOperator import KaapanaPythonBaseOperator
-from kaapana.blueprints.kaapana_global_variables import BATCH_NAME, WORKFLOW_DIR
 
 
 class LocalSegCheckOperator(KaapanaPythonBaseOperator):
-
     def get_nifti_dimensions(self, input_dir, check_labels=True):
         input_files = sorted(glob.glob(join(input_dir, "**", "*.nii*"), recursive=True))
         # print(f"Check for NIFTI at {input_dir}: found {len(input_files)} files.")
@@ -50,11 +48,11 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
         # labels = data.BodyPartExamined
         columns = data.Columns
         rows = data.Rows
-        if data.Modality == "SEG" and hasattr(data, 'NumberOfFrames'):
+        if data.Modality == "SEG" and hasattr(data, "NumberOfFrames"):
             numberOfFrames = data.NumberOfFrames
             label_count = len(data.SegmentSequence)
             numberOfFrames //= label_count
-        elif not hasattr(data, 'NumberOfFrames'):
+        elif not hasattr(data, "NumberOfFrames"):
             numberOfFrames = len(next(os.walk(dirname(dcm_path)))[2])
         else:
             print("# ")
@@ -75,8 +73,10 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
 
         case_count = 0
         ignored_cases = []
-        run_dir = join(WORKFLOW_DIR, kwargs['dag_run'].run_id)
-        batch_folders = sorted([f for f in glob.glob(join(run_dir, BATCH_NAME, '*'))])
+        run_dir = join(self.airflow_workflow_dir, kwargs["dag_run"].run_id)
+        batch_folders = sorted(
+            [f for f in glob.glob(join(run_dir, self.batch_name, "*"))]
+        )
         output_dir = join(run_dir, self.operator_out_dir)
 
         print("# Found {} batches".format(len(batch_folders)))
@@ -86,33 +86,42 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
 
         for batch_element_dir in batch_folders:
             print("# ")
-            print("##############################################################################################################")
+            print(
+                "##############################################################################################################"
+            )
             print("# ")
             print(f"# Testing: {batch_element_dir.split('/')[-1]}")
             print("# ")
             dimensions_list = []
             input_dirs_complete = [join(batch_element_dir, dir) for dir in input_dirs]
+            with ThreadPool(self.parallel_checks) as threadpool:
+                dcm_results = threadpool.imap_unordered(
+                    self.get_dicom_dimensions, input_dirs_complete
+                )
 
-            dcm_results = ThreadPool(self.parallel_checks).imap_unordered(self.get_dicom_dimensions, input_dirs_complete)
-
-            nifti_check_list = []
-            for dcm_result in dcm_results:
-                if len(dcm_result) == 2:
-                    dimensions_list.append(dcm_result[1])
-                else:
-                    nifti_check_list.append(dcm_result[0])
+                nifti_check_list = []
+                for dcm_result in dcm_results:
+                    if len(dcm_result) == 2:
+                        dimensions_list.append(dcm_result[1])
+                    else:
+                        nifti_check_list.append(dcm_result[0])
 
             if len(nifti_check_list) > 0:
-                nifti_results = ThreadPool(self.parallel_checks).imap_unordered(self.get_nifti_dimensions, nifti_check_list)
+                with ThreadPool(self.parallel_checks) as threadpool:
+                    nifti_results = threadpool.imap_unordered(
+                        self.get_nifti_dimensions, nifti_check_list
+                    )
 
-                for nifti_result in nifti_results:
-                    if len(nifti_result) == 2:
-                        dimensions_list.append(nifti_result[1])
-                    else:
-                        dimensions_list.append(None)
-                        print("# ")
-                        print(f"# Could not extract dimensions: {nifti_check_list[0]}")
-                        print("# ")
+                    for nifti_result in nifti_results:
+                        if len(nifti_result) == 2:
+                            dimensions_list.append(nifti_result[1])
+                        else:
+                            dimensions_list.append(None)
+                            print("# ")
+                            print(
+                                f"# Could not extract dimensions: {nifti_check_list[0]}"
+                            )
+                            print("# ")
 
             last_dimension = None
             error = False
@@ -127,31 +136,39 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
                     if dimension != last_dimension:
                         error = True
                         print("# ")
-                        print(f"# {input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: ERROR")
+                        print(
+                            f"# {input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: ERROR"
+                        )
                         print("# ERROR: Dimensions are different!!!")
                         print("# ")
                         if self.anonymize:
                             file_id = case_count
-                            case_count +=1
+                            case_count += 1
                         else:
                             file_id = basename(batch_element_dir)
 
-                        ignored_cases.append(f"{file_id}: {input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: ERROR")
+                        ignored_cases.append(
+                            f"{file_id}: {input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: ERROR"
+                        )
                     else:
-                        print(f"{input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: OK")
+                        print(
+                            f"{input_dirs[i-1]} vs {input_dirs[i]}: {last_dimension} <-> {dimension}: OK"
+                        )
 
                 last_dimension = dimension
 
             if error:
                 if self.move_data:
-                    target_dir = batch_element_dir.replace(BATCH_NAME, "dimension_issue")
+                    target_dir = batch_element_dir.replace(
+                        self.batch_name, "dimension_issue"
+                    )
                     print("# ")
                     print("# Moving batch-data:")
                     print(f"{batch_element_dir} -> {target_dir}")
                     print("# ")
                     shutil.move(batch_element_dir, target_dir)
                 if self.abort_on_error:
-                    raise ValueError('ERROR')
+                    raise ValueError("ERROR")
 
         print("# ")
         if len(ignored_cases) > 0:
@@ -160,22 +177,23 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
             print("# ")
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             log_path = join(output_dir, "log_ignored_cases.txt")
-            with open(log_path, 'w') as f:
+            with open(log_path, "w") as f:
                 for item in ignored_cases:
                     f.write("%s\n" % item)
         print("# ")
         print("# DONE ")
         print("# ")
 
-    def __init__(self,
-                 dag,
-                 input_operators,
-                 move_data=True,
-                 abort_on_error=False,
-                 anonymize=True,
-                 parallel_checks=3,
-                 **kwargs):
-
+    def __init__(
+        self,
+        dag,
+        input_operators,
+        move_data=True,
+        abort_on_error=False,
+        anonymize=True,
+        parallel_checks=3,
+        **kwargs,
+    ):
         self.abort_on_error = abort_on_error
         self.move_data = move_data
         self.anonymize = anonymize
@@ -187,5 +205,5 @@ class LocalSegCheckOperator(KaapanaPythonBaseOperator):
             name="check-seg-data",
             python_callable=self.start,
             execution_timeout=timedelta(minutes=60),
-            **kwargs
+            **kwargs,
         )
