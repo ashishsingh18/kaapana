@@ -4,8 +4,8 @@ kind: Deployment
 metadata:
   # This name uniquely identifies the Deployment
   name: hello-world
-  namespace: base
-  #namespace: {{ .Values.global.base_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
+  #namespace: "{{ .Values.global.services_namespace }}"
 spec:
   replicas: 1
   selector:
@@ -20,10 +20,8 @@ spec:
     spec:
       containers:
       - name: hello-world
-        image: <docker-registry><docker-repo>/hello-world:0.1.0
-        #image: {{  .Values.global.registry_url }}{{  .Values.global.registry_project }}/hello-world:0.1.0
-        imagePullPolicy: {{ .Values.global.pull_policy_pods }}
-        #imagePullPolicy:  {{ .Values.global.pull_policy_pods }}
+        image: "{{ .Values.global.registry_url }}/hello-world:{{ .Values.global.kaapana_build_version  }}"
+        imagePullPolicy: Always
         env: # Environment variables
         - name: SECRET_KEY
           value: kaapana-secret

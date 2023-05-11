@@ -1,16 +1,16 @@
 ---
 apiVersion: v1
 data:
-{{ if .Values.global.email_config.deploy_postfix }}
+{{- if .Values.global.email_config.deploy_postfix }}
 {{ (.Files.Glob "files/alert.rules").AsConfig | indent 2 }}
-{{ else }}
+{{- else }}
 {{ (.Files.Glob "files/no_postfix/alert.rules").AsConfig | indent 2 }}
-{{ end }}
+{{- end }}
 kind: ConfigMap
 metadata:
   name: prometheus-alerts-config
   labels:
     name: prometheus-alerts-config
-  namespace: {{ .Values.global.monitoring_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
 
 ---

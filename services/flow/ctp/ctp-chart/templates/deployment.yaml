@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ctp
-  namespace: {{ .Values.global.flow_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
 spec:
   replicas: 1
   selector:
@@ -16,17 +16,17 @@ spec:
     spec:
       containers:
         - name: ctp-container
-          image: {{  .Values.global.registry_url }}{{  .Values.global.registry_project }}/ctp:0.1.1
-          imagePullPolicy:  {{ .Values.global.pull_policy_pods }}
+          image: "{{ .Values.global.registry_url }}/ctp:{{ .Values.global.kaapana_build_version  }}"
+          imagePullPolicy:  {{ .Values.global.pull_policy_images }}
           ports:
             - containerPort: 11112
             - containerPort: 1050
             - containerPort: 7777
           resources:
             requests:
-              memory: 250Mi
+              memory: 1024Mi
             limits:
-              memory: 2500Mi
+              memory: 3000Mi
           volumeMounts:
             - name: ctp-data
               mountPath: /data/
@@ -35,27 +35,28 @@ spec:
             - name: config-file
               mountPath: /opt/CTP/config.xml
               subPath: config.xml
-          livenessProbe:
-            tcpSocket:
-              port: 1050
-            initialDelaySeconds: 30
-            periodSeconds: 120
+            - name: launcher-properties
+              mountPath: /opt/CTP/Launcher.properties
+              subPath: Launcher.properties
       volumes:
       - name: ctp-data
-        hostPath:
-          path: {{ .Values.global.fast_data_dir }}/ctp
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: ctp-data-pv-claim
       - name: ctp-logs
-        hostPath:
-          path: {{ .Values.global.fast_data_dir }}/ctp/logs
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: ctp-log-pv-claim
       - name: config-file
         configMap:
           name: ctp-config
           items:
           - key: config.xml
             path: config.xml
+      - name: launcher-properties
+        configMap:
+          name: ctp-config
+          items:
+          - key: Launcher.properties
+            path: Launcher.properties
       imagePullSecrets:
       - name: registry-secret
 ---
-

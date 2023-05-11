@@ -2,37 +2,56 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: ctp-service
-  namespace: {{ .Values.global.flow_namespace }}
+  name: ctp-internal-service
+  namespace: "{{ .Values.global.services_namespace }}"
   labels:
     app-name: ctp
 spec:
   selector:
     app-name: ctp
-  type: NodePort
-  externalTrafficPolicy: Local
+  type: ClusterIP
   ports:
   - name: ctp-port
     port: 80
     targetPort: 1050
     protocol: TCP
-  - name: ctp-dcm-port
-    port: 11112
-    nodePort: {{ .Values.global.dicom_port }}
-    targetPort: 11112
   - name: ctp-http-port
-    port: {{ .Values.global.dicom_web_port }}
+    port: {{ .Values.global.dicom_web_port | default "7777" }}
     targetPort: 7777
 ---
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: v1
+kind: Service
+metadata:
+  name: ctp-dicom-service
+  namespace: "{{ .Values.global.services_namespace }}"
+  labels:
+    app-name: ctp
+spec:
+  selector:
+    app-name: ctp
+{{- if ne (.Values.global.dicom_port | default "11112") "0" }}
+  type: NodePort
+  externalTrafficPolicy: Local
+  ports:
+  - name: ctp-dcm-port
+    port: 11112
+    targetPort: 11112
+    nodePort: {{ .Values.global.dicom_port }}
+{{- else }}
+  type: ClusterIP
+  ports:
+  - name: ctp-dcm-port
+    port: 11112
+    targetPort: 11112
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1 
 kind: Ingress
 metadata:
   name: ctp-ingress-ip
-  namespace: {{ .Values.global.flow_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: kube-system-errorpages@kubernetescrd
-    # traefik.frontend.rule.type: PathPrefixStrip
     kubernetes.io/ingress.global-static-ip-name: "kubernetes-ingress"
 spec:
   rules:
@@ -40,10 +59,17 @@ spec:
     http:
       paths:
       - path: /ctp
+        pathType: ImplementationSpecific
         backend:
-          serviceName: ctp-service
-          servicePort: 80
+          service:
+            name: ctp-internal-service
+            port:
+              number: 80
       - path: /dicomweb
+        pathType: ImplementationSpecific
         backend:
-          serviceName: ctp-service
-          servicePort: {{ .Values.global.dicom_web_port }}
+          service:
+            name: ctp-internal-service
+            port:
+              number: {{ .Values.global.dicom_web_port | default "7777"}}
+---

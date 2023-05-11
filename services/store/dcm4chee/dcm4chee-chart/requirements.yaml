@@ -1,0 +1,8 @@
+---
+dependencies:
+  - name: dcm4che-ldap
+    version: 0.0.0
+    repository: file://deps/dcm4che-ldap
+  - name: dcm4che-postgres
+    version: 0.0.0
+    repository: file://deps/dcm4che-postgres

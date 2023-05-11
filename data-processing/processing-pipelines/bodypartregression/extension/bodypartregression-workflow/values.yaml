@@ -1,0 +1,4 @@
+---
+global:
+    image: "dag-bodypartregression"
+    action: "copy"

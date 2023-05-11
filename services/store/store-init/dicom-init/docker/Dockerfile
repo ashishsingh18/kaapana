@@ -1,27 +1,17 @@
-FROM dktk-jip-registry.dkfz.de/kaapana-public/dicom_phantom:1.0 as files
+FROM local-only/base-python-cpu:latest
 
 LABEL IMAGE="dicom-init"
-LABEL VERSION="0.1.0"
+LABEL VERSION="0.1.3"
 LABEL CI_IGNORE="False"
 
-FROM ubuntu:20.04
+WORKDIR /kaapana/app
 
-ENV TZ=Europe/Berlin
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN curl --output /test-dicoms.zip "https://www.kaapana.ai/kaapana-downloads/kaapana-build-files/init-dicoms/0.0.4/init-dicoms.zip" \
+    && mkdir -p /dicom_test_data && unzip /test-dicoms.zip -d /dicom_test_data && rm -rf test-dicoms.zip
 
-COPY --from=files /Winfried_phantom.zip /example/Winfried_phantom.zip
+COPY files/requirements.txt /kaapana/app/
+RUN python3 -m pip install --no-cache-dir -r /kaapana/app/requirements.txt && rm /kaapana/app/requirements.txt 
 
-RUN apt-get update && apt-get install -y \
-    dcmtk \
-    python3 \
-    python3-pip \
-    && rm -rf /var/lib/apt/lists/*
+COPY files/start.py /kaapana/app/start.py
 
-RUN pip3 install pydicom \
-    requests \
-    elasticsearch
-
-COPY files/full_index_dicom /test_dicom
-COPY files/start.py /start.py
-
-CMD ["python3","-u","/start.py"]
+CMD ["python3","-u","/kaapana/app/start.py"]

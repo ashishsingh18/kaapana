@@ -1,5 +1,5 @@
-FROM prom/prometheus:v2.20.1
+FROM docker.io/bitnami/prometheus:2.34.0
 
 LABEL IMAGE="prometheus"
-LABEL VERSION="v2.20.1"
+LABEL VERSION="v2.34.0"
 LABEL CI_IGNORE="False"

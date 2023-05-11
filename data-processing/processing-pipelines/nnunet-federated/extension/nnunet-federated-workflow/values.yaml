@@ -1,0 +1,4 @@
+---
+global:
+    image: "dag-nnunet-federated"
+    action: "copy"

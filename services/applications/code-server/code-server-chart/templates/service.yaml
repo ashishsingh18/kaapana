@@ -1,35 +1,36 @@
 kind: Service
 apiVersion: v1
 metadata:
-  name: code-service
-  namespace: {{ .Values.global.base_namespace }}
+  name: {{ .Release.Name }}
+  namespace: "{{ tpl .Values.global.namespace . }}"
 spec:
   selector:
-    app-name: code-server
+    app-name: {{ .Release.Name }}
   ports:
     - protocol: TCP
       port: 8080
-      name: code-http
+      name: vs-http
   type: ClusterIP
 ---
 apiVersion: traefik.containo.us/v1alpha1
 kind: Middleware
 metadata:
-  name: code-redirect
-  namespace: {{ .Values.global.base_namespace }}
+  name: cs-strip-prefix-{{ .Release.Name }}
+  namespace: "{{ tpl .Values.global.namespace . }}"
 spec:
-  redirectRegex:
-    regex: ^.*/code([^\/]*)$
-    replacement: /code/
+  stripPrefix:
+    prefixes:
+    - {{ printf "/%s" (tpl .Values.global.ingress_path .) }}
+    forceSlash: true
 ---
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1 
 kind: Ingress
 metadata:
-  name: code-server-ingress
-  namespace: {{ .Values.global.base_namespace }}
+  name: {{ .Release.Name }}
+  namespace: "{{ tpl .Values.global.namespace . }}"
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: kube-system-errorpages@kubernetescrd,{{ .Values.global.base_namespace }}-code-redirect@kubernetescrd,kube-system-strip-prefix@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: {{ tpl .Values.global.namespace . }}-cs-strip-prefix-{{ .Release.Name }}@kubernetescrd
     traefik.ingress.kubernetes.io/preserve-host: "true"
     kubernetes.io/ingress.global-static-ip-name: "kubernetes-ingress"
 spec:
@@ -37,8 +38,10 @@ spec:
   - host: 
     http:
       paths:
-      - path: /code
+      - path: {{ printf "/%s/" (tpl .Values.global.ingress_path .) }}
+        pathType: ImplementationSpecific
         backend:
-          serviceName: code-service
-          servicePort: code-http
----
+          service:
+            name: {{ .Release.Name }}
+            port:
+              name: vs-http

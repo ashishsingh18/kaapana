@@ -1,7 +1,9 @@
 ---
 global:
-    pull_policy_pods: "IfNotPresent"
-    flow_namespace: "flow"
-    dicom_port: 11112
-    dicom_web_port: 7777
-    fast_data_dir: /home/kaapana
+  pull_policy_images: "IfNotPresent"
+  fast_data_dir: /home/kaapana
+  dynamicVolumes:
+  - name: ctp-log
+    host_path: /ctp/logs
+  - name: ctp-data
+    host_path: /ctp/

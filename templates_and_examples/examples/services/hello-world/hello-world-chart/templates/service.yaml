@@ -3,8 +3,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: hello-world-service
-  namespace: base
-  #namespace: {{ .Values.global.base_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
+  #namespace: "{{ .Values.global.services_namespace }}"
   labels:
     app-name: hello-world
 spec:
@@ -17,15 +17,14 @@ spec:
       nodePort: 5000 # only for development!
   type: NodePort # only for development!
 ---
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1 
 kind: Ingress
 metadata:
   name: hello-world-ingress
-  namespace: base
-  #namespace: {{ .Values.global.base_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
+  #namespace: "{{ .Values.global.services_namespace }}"
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: kube-system-errorpages@kubernetescrd
     kubernetes.io/ingress.global-static-ip-name: "kubernetes-ingress"
 spec:
   rules:
@@ -33,6 +32,10 @@ spec:
     http:
       paths:
       - path: /hello-world
+        pathType: ImplementationSpecific
         backend:
-          serviceName: hello-world-service
-          servicePort: 5000
+          service:
+            name: hello-world-service
+            port:
+              number: 5000
+---

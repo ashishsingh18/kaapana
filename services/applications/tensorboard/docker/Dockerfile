@@ -1,14 +1,15 @@
-FROM python:3
+FROM local-only/base-python-cpu:latest
 
 LABEL IMAGE="tensorboard"
-LABEL VERSION="2.3.0"
+LABEL VERSION="2.12.0"
 LABEL CI_IGNORE="False"
 
-RUN pip3 install tensorboard==2.3.0
+ENV INGRESS_PATH /tensorboard
+ENV LOG_DIR=/kaapana/mounted/tensorboard
+
+COPY files/requirements.txt /src/requirements.txt
+RUN pip3 install --no-cache-dir -r /src/requirements.txt
 
 COPY files/tensorboard.sh /
 
-ENV INGRESS_PATH /tensorboard
-ENV LOG_DIR=/data
-
-CMD ["/bin/bash", "/tensorboard.sh"]
+CMD ["/bin/sh", "/tensorboard.sh"]

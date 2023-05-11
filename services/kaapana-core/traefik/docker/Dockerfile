@@ -1,5 +1,0 @@
-FROM traefik:v2.3
-
-LABEL IMAGE="traefik"
-LABEL VERSION="v2.3"
-LABEL CI_IGNORE="False"

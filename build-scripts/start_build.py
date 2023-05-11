@@ -1,362 +1,731 @@
-from shutil import which, copy
+#!/usr/bin/env python3
+from shutil import copyfile, rmtree
 import yaml
-import json
 import os
-import getpass
-from glob import glob
+import logging
+from os.path import join, dirname, exists
 from time import time
 from argparse import ArgumentParser
-from build_helper.charts_build_and_push_all import HelmChart
-from build_helper.containers_build_and_push_all import start_container_build
-from build_helper.charts_build_and_push_all import init_helm_charts
-
-log_list = {
-    "CONTAINERS": [],
-    "CHARTS": [],
-    "OTHER": []
-}
-supported_log_levels = ["DEBUG", "WARN", "ERROR"]
+from build_helper.charts_helper import HelmChart, init_helm_charts, helm_registry_login
+from build_helper.container_helper import Container, container_registry_login
+from build_helper.build_utils import BuildUtils
+from build_helper.security_utils import TrivyUtils
 
 
-class SkipException(Exception):
-    """Exception raised for errors within the build-process.
+supported_log_levels = ["DEBUG", "INFO", "WARN", "ERROR"]
 
-    Attributes:
-        reason  -- reason why the container was skipped for the build process
-    """
-
-    def __init__(self, reason, log=None):
-        self.reason = reason
-        if "container" in log:
-            del log['container']
-        self.log = log
-        super().__init__(self.reason)
-
-    def __str__(self):
-        if self.log is not None:
-            return self.reason + "\n" + json.dumps(self.log, indent=4, sort_keys=True)
-        else:
-            return self.reason
-
-
-def print_log_entry(log_entry, kind="OTHER"):
-    log_entry_loglevel = log_entry['loglevel'].upper()
-    if supported_log_levels.index(log_entry_loglevel) >= log_level:
-        print("-----------------------------------------------------------")
-        print("Log: {}".format(log_entry["test"]))
-        print("Step: {}".format(log_entry["step"] if "step" in log_entry else "na"))
-        print("Message: {}".format(log_entry["message"] if "message" in log_entry else "na"))
-        print("-----------------------------------------------------------")
-
-    if "container" in log_entry:
-        del log_entry['container']
-    log_list[kind].append([log_entry_loglevel, json.dumps(log_entry, indent=4, sort_keys=True)])
-
-
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("-c", "--config", dest="config_filepath", default=None, help="Path the the build-configuration.yaml")
-    parser.add_argument("-u", "--username", dest="username", default=None, help="Username")
-    parser.add_argument("-p", "--password", dest="password", default=None, required=False, help="Password")
-    parser.add_argument("-bo", "--build-only", dest="build_only", default=False, action='store_true', help="Just building the containers and charts -> no pushing")
-    parser.add_argument("-co", "--charts-only", dest="charts_only", default=False, action='store_true', help="Just build all helm charts.")
-    parser.add_argument("-do", "--docker-only", dest="docker_only", default=False, action='store_true', help="Just build all Docker containers charts.")
-
+    parser.add_argument(
+        "-c",
+        "--config",
+        dest="config_filepath",
+        default=None,
+        help="Path the the build-config.yaml",
+    )
+    parser.add_argument(
+        "-u", "--username", dest="username", default=None, help="Username"
+    )
+    parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        required=False,
+        help="Password",
+    )
+    parser.add_argument(
+        "-dr",
+        "--default-registry",
+        dest="default_registry",
+        default=None,
+        help="Name of the registry to which the platform should be build.",
+    )
+    parser.add_argument(
+        "-bo",
+        "--build-only",
+        dest="build_only",
+        default=None,
+        action="store_true",
+        help="Just building the containers and charts -> no pushing",
+    )
+    parser.add_argument(
+        "-oi",
+        "--create-offline-installation",
+        dest="create_offline_installation",
+        action="store_true",
+        default=None,
+        help="Will create a docker dump, from which the platfrom can be installed.",
+    )
+    parser.add_argument(
+        "-pm",
+        "--push-to-microk8s",
+        dest="push_to_microk8s",
+        default=None,
+        help="Will create a docker dump, from which the platfrom can be installed.",
+    )
+    parser.add_argument(
+        "-kd",
+        "--kaapana-dir",
+        dest="kaapana_dir",
+        default=None,
+        help="Kaapana repo path.",
+    )
+    parser.add_argument(
+        "-ll", "--log-level", dest="log_level", default=None, help="Set log-level."
+    )
+    parser.add_argument(
+        "-el",
+        "--enable-linting",
+        dest="enable_linting",
+        action="store_true",
+        default=None,
+        help="Enable Helm Chart lint & kubeval.",
+    )
+    parser.add_argument(
+        "-sp",
+        "--skip-push-no-changes",
+        dest="skip_push_no_changes",
+        default=None,
+        action="store_true",
+        help="Skip the image push if it didn't change.",
+    )
+    parser.add_argument(
+        "-ee",
+        "--exit-on-error",
+        dest="exit_on_error",
+        default=None,
+        action="store_true",
+        help="Stop build-process if error occurs.",
+    )
+    parser.add_argument(
+        "-pf",
+        "--plartform-filter",
+        dest="platform_filter",
+        default=None,
+        help="Specify platform-chart-names to be build (comma seperated).",
+    )
+    parser.add_argument(
+        "-es",
+        "--external-sources",
+        dest="external_source_dirs",
+        default=None,
+        help="External dirs to search for containers and charts.",
+    )
+    parser.add_argument(
+        "-pp",
+        "--parallel-processes",
+        dest="parallel_processes",
+        default=2,
+        help="Parallel process count for container build + push.",
+    )
+    parser.add_argument(
+        "-ic",
+        "--include-credentials",
+        dest="include_credentials",
+        default=None,
+        action="store_true",
+        help="Whether to inlude the used registry credentials into the deploy-platform script.",
+    )
+    parser.add_argument(
+        "-bd",
+        "--build-dir",
+        dest="build_dir",
+        default=None,
+        help="Specify the main Kaapana repo-dir to build from.",
+    )
+    parser.add_argument(
+        "-bip",
+        "--build-ignore-patterns",
+        dest="build_ignore_patterns",
+        default=None,
+        help="Comma seperated list of directory paths or files that should be ignored.",
+    )
+    parser.add_argument(
+        "-nl",
+        "--no-login",
+        dest="no_login",
+        default=False,
+        action="store_true",
+        help="Skipps the logins to the container registry (expects to be already logged in).",
+    )
+    parser.add_argument(
+        "-vs",
+        "--vulnerability-scan",
+        dest="vulnerability_scan",
+        default=None,
+        action="store_true",
+        help="Scan the built containers with trivy for vulnerabilities.",
+    )
+    parser.add_argument(
+        "-vsl",
+        "--vulnerability-severity-level",
+        dest="vulnerability_severity_level",
+        default=None,
+        action="store_true",
+        help="Filter by severity of findings. CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN.",
+    )
+    parser.add_argument(
+        "-cc",
+        "--configuration-check",
+        dest="configuration_check",
+        default=None,
+        action="store_true",
+        help="Wheter the Charts, deployments, dockerfiles etc. should be checked for configuration errors",
+    )
+    parser.add_argument(
+        "-ccl",
+        "--configuration-check-severity-level",
+        dest="configuration_check_severity_level",
+        default=None,
+        action="store_true",
+        help="Filter by severity of findings. CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN.",
+    )
+    parser.add_argument(
+        "-sbom",
+        "--create-sboms",
+        dest="create_sboms",
+        default=None,
+        action="store_true",
+        help="Create Software Bill of Materials (SBOMs) for the built containers.",
+    )
+    parser.add_argument(
+        "-is",
+        "--enable-image-stats",
+        dest="enable_image_stats",
+        default=None,
+        action="store_true",
+        help="Enable container image size statistics (image_stats.json)",
+    )
+    parser.add_argument(
+        "--latest",
+        dest="latest",
+        default=False,
+        action="store_true",
+        help="Force version to 'latest'",
+    )
     args = parser.parse_args()
-    registry_user = args.username
-    registry_pwd = args.password
-    build_only = args.build_only
-    charts_only = args.charts_only
-    docker_only = args.docker_only
-    config_filepath = args.config_filepath
 
-    kaapana_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    kaapana_dir = (
+        args.kaapana_dir
+        if args.kaapana_dir != None
+        else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    build_dir = (
+        args.build_dir
+        if args.build_dir != None
+        else join(dirname(dirname(os.path.realpath(__file__))), "build")
+    )
+
+    if exists(build_dir):
+        rmtree(build_dir)
+    os.makedirs(build_dir, exist_ok=True)
+
+    # Create a custom logger
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger = logging.getLogger(__name__)
+
+    c_handler = logging.StreamHandler()
+    c_handler.setLevel(logging.DEBUG)
+
+    f_handler = logging.FileHandler(join(build_dir, "build.log"))
+    f_handler.setLevel(logging.DEBUG)
+
+    c_format = logging.Formatter("%(levelname)s - %(message)s")
+    f_format = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    c_handler.setFormatter(c_format)
+    f_handler.setFormatter(f_format)
+
+    # Add handlers to the logger
+    logger.addHandler(c_handler)
+    logger.addHandler(f_handler)
+
     if not os.path.isdir(os.path.join(kaapana_dir, "platforms")):
-        print("The dir 'platforms' was not found! -> wrong kaapana_dir? -> exit!")
-        print("-----------------------------------------------------------")
+        logger.error(
+            "----------------------------------------------------------------------"
+        )
+        logger.error(
+            "The dir 'platforms' was not found! -> wrong kaapana_dir? -> exit!"
+        )
+        logger.error(
+            "----------------------------------------------------------------------"
+        )
         exit(1)
 
-    config_filepath = config_filepath if config_filepath is not None else os.path.join(kaapana_dir, "build-scripts", "build-configuration.yaml")
+    template_config_filepath = os.path.join(
+        kaapana_dir, "build-scripts", "build-config-template.yaml"
+    )
+    assert exists(template_config_filepath)
+    with open(template_config_filepath, "r") as stream:
+        try:
+            template_configuration = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            logger.info(exc)
+
+    config_filepath = args.config_filepath
+    config_filepath = (
+        config_filepath
+        if config_filepath is not None
+        else os.path.join(kaapana_dir, "build-scripts", "build-config.yaml")
+    )
+    template_config_filepath = os.path.join(
+        kaapana_dir, "build-scripts", "build-config-template.yaml"
+    )
     if not os.path.isfile(config_filepath):
-        print("The build-configuration.yaml file was not found at: {}".format(config_filepath))
-        print("-----------------------------------------------------------")
+        logger.error("")
+        logger.error("")
+        logger.error(f"The build-configuration.yaml was not found!")
+        logger.error(f"Default config has been created -> please adjust as needed !!")
+        logger.error("")
+        logger.error(f"See: {config_filepath}")
+        copyfile(src=template_config_filepath, dst=config_filepath)
+        logger.error("")
+        logger.error("")
+        logger.error("-----------------------------------------------------------")
         exit(1)
-    print("-----------------------------------------------------------")
-    print("--------------- loading build-configuration ---------------")
-    print("-----------------------------------------------------------")
+    logger.info("-----------------------------------------------------------")
+    logger.info("--------------- loading build-configuration ---------------")
+    logger.info("-----------------------------------------------------------")
 
-    with open(config_filepath, 'r') as stream:
+    with open(config_filepath, "r") as stream:
         try:
             configuration = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
-            print(exc)
+            logger.info(exc)
 
-    if "build_mode" not in configuration or (configuration["build_mode"] != "local" and configuration["build_mode"] != "private" and configuration["build_mode"] != "dockerhub"):
-        print("-----------------------------------------------------------")
-        print("------------------- CONFIGURATION ERROR -------------------")
-        print("-----------------------------------------------------------")
-        print("Please set the configuration key 'build_mode' to 'local', 'dockerhub', 'private'")
-        print("Please adjust the build-configuration.yaml")
-        print("Abort")
-        exit(1)
+    conf_http_proxy = (
+        configuration["http_proxy"]
+        if "http_proxy" in configuration
+        else template_configuration["http_proxy"]
+    )
+    conf_default_registry = (
+        configuration["default_registry"]
+        if "default_registry" in configuration
+        else template_configuration["default_registry"]
+    )
+    conf_container_engine = (
+        configuration["container_engine"]
+        if "container_engine" in configuration
+        else template_configuration["container_engine"]
+    )
+    conf_log_level = (
+        configuration["log_level"]
+        if "log_level" in configuration
+        else template_configuration["log_level"]
+    )
+    conf_build_only = (
+        configuration["build_only"]
+        if "build_only" in configuration
+        else template_configuration["build_only"]
+    )
+    conf_create_offline_installation = (
+        configuration["create_offline_installation"]
+        if "create_offline_installation" in configuration
+        else template_configuration["create_offline_installation"]
+    )
+    conf_push_to_microk8s = (
+        configuration["push_to_microk8s"]
+        if "push_to_microk8s" in configuration
+        else template_configuration["push_to_microk8s"]
+    )
+    conf_platform_filter = (
+        configuration["platform_filter"].split(",")
+        if configuration["platform_filter"].replace(" ", "") != ""
+        else []
+    )
+    conf_external_source_dirs = (
+        configuration["external_source_dirs"].split(",")
+        if configuration["external_source_dirs"].replace(" ", "") != ""
+        else []
+    )
+    conf_build_ignore_patterns = (
+        configuration["build_ignore_patterns"].split(",")
+        if configuration["build_ignore_patterns"].replace(" ", "") != ""
+        else []
+    )
+    conf_exit_on_error = (
+        configuration["exit_on_error"]
+        if "exit_on_error" in configuration
+        else template_configuration["exit_on_error"]
+    )
+    conf_enable_linting = (
+        configuration["enable_linting"]
+        if "enable_linting" in configuration
+        else template_configuration["enable_linting"]
+    )
+    conf_enable_build_kit = (
+        1
+        if "enable_build_kit" in configuration and configuration["enable_build_kit"]
+        else 0
+    )
+    conf_skip_push_no_changes = (
+        configuration["skip_push_no_changes"]
+        if "skip_push_no_changes" in configuration
+        else template_configuration["skip_push_no_changes"]
+    )
+    conf_parallel_processes = (
+        configuration["parallel_processes"]
+        if "parallel_processes" in configuration
+        else template_configuration["parallel_processes"]
+    )
+    conf_registry_username = (
+        configuration["registry_username"]
+        if "registry_username" in configuration
+        else template_configuration["registry_username"]
+    )
+    conf_registry_username = (
+        conf_registry_username if conf_registry_username != "" else None
+    )
+    conf_registry_password = (
+        configuration["registry_password"]
+        if "registry_password" in configuration
+        else template_configuration["registry_password"]
+    )
+    conf_registry_password = (
+        conf_registry_password if conf_registry_password != "" else None
+    )
+    conf_include_credentials = (
+        configuration["include_credentials"]
+        if "include_credentials" in configuration
+        else template_configuration["include_credentials"]
+    )
+    conf_vulnerability_scan = (
+        configuration["vulnerability_scan"]
+        if "vulnerability_scan" in configuration
+        else template_configuration["vulnerability_scan"]
+    )
+    conf_vulnerability_severity_level = (
+        configuration["vulnerability_severity_level"]
+        if "vulnerability_severity_level" in configuration
+        else template_configuration["vulnerability_severity_level"]
+    )
+    conf_configuration_check = (
+        configuration["configuration_check"]
+        if "configuration_check" in configuration
+        else template_configuration["configuration_check"]
+    )
+    conf_configuration_check_severity_level = (
+        configuration["configuration_check_severity_level"]
+        if "configuration_check_severity_level" in configuration
+        else template_configuration["configuration_check_severity_level"]
+    )
+    conf_enable_image_stats = (
+        configuration["enable_image_stats"]
+        if "enable_image_stats" in configuration
+        else template_configuration["enable_image_stats"]
+    )
+    conf_create_sboms = (
+        configuration["create_sboms"]
+        if "create_sboms" in configuration
+        else template_configuration["create_sboms"]
+    )
 
-    build_mode = configuration["build_mode"]
-    print("Build-mode: {}!".format(build_mode))
+    registry_user = (
+        args.username if args.username is not None else conf_registry_username
+    )
+    registry_pwd = (
+        args.password if args.password is not None else conf_registry_password
+    )
 
-    build_containers = False if charts_only else configuration["build_containers"]
-    push_containers = False if charts_only else configuration["push_containers"]
-    push_containers = False if build_only else push_containers
+    build_only = args.build_only if args.build_only != None else conf_build_only
+    create_offline_installation = (
+        args.create_offline_installation
+        if args.create_offline_installation != None
+        else conf_create_offline_installation
+    )
+    push_to_microk8s = (
+        args.push_to_microk8s
+        if args.push_to_microk8s != None
+        else conf_push_to_microk8s
+    )
+    external_source_dirs = (
+        args.external_source_dirs.split(",")
+        if args.external_source_dirs != None
+        else conf_external_source_dirs
+    )
+    build_ignore_patterns = (
+        args.build_ignore_patterns.split(",")
+        if args.build_ignore_patterns != None
+        else conf_build_ignore_patterns
+    )
+    log_level = args.log_level if args.log_level != None else conf_log_level
+    enable_linting = (
+        args.enable_linting if args.enable_linting != None else conf_enable_linting
+    )
+    exit_on_error = (
+        args.exit_on_error if args.exit_on_error != None else conf_exit_on_error
+    )
+    platform_filter = (
+        args.platform_filter.split(",")
+        if args.platform_filter != None
+        else conf_platform_filter
+    )
+    skip_push_no_changes = (
+        args.skip_push_no_changes
+        if args.skip_push_no_changes != None
+        else conf_skip_push_no_changes
+    )
+    parallel_processes = int(
+        args.parallel_processes
+        if args.parallel_processes != 2
+        else conf_parallel_processes
+    )
+    include_credentials = (
+        args.include_credentials
+        if args.include_credentials != None
+        else conf_include_credentials
+    )
+    vulnerability_scan = (
+        args.vulnerability_scan
+        if args.vulnerability_scan != None
+        else conf_vulnerability_scan
+    )
+    vulnerability_severity_level = (
+        args.vulnerability_severity_level
+        if args.vulnerability_severity_level != None
+        else conf_vulnerability_severity_level
+    )
+    configuration_check = (
+        args.configuration_check
+        if args.configuration_check != None
+        else conf_configuration_check
+    )
+    configuration_check_severity_level = (
+        args.configuration_check_severity_level
+        if args.configuration_check_severity_level != None
+        else conf_configuration_check_severity_level
+    )
+    enable_image_stats = (
+        args.enable_image_stats
+        if args.enable_image_stats != None
+        else conf_enable_image_stats
+    )
+    create_sboms = args.create_sboms if args.create_sboms != None else conf_create_sboms
+    no_login = args.no_login
+    version_latest = args.latest
 
-    create_package = configuration["create_package"]
-    if build_mode == "local" and not create_package:
-        print("local build: Forcing create_package = True !")
-        create_package = True
+    for external_source_dir in external_source_dirs:
+        if not os.path.isdir(external_source_dir):
+            logger.error(
+                "---------------------------------------------------------------------------------------------"
+            )
+            logger.error(
+                f"External source-dir: {external_source_dir} does not exist -> exit!"
+            )
+            logger.error(
+                "---------------------------------------------------------------------------------------------"
+            )
+            exit(1)
 
-    if create_package:
-        build_dir = os.path.join(kaapana_dir, "build")
-        os.makedirs(build_dir, exist_ok=True)
+    charts_lint = True if enable_linting else False
+    charts_kubeval = True if enable_linting else False
+    charts_push = False if build_only else True
+    containers_push = False if build_only else True
+    container_build = True
+    build_installer_scripts = True
 
-    build_charts = False if docker_only else configuration["build_charts"]
-    push_charts = False if docker_only else configuration["push_charts"]
-    push_charts = False if build_only else push_charts
+    build_ignore_patterns = build_ignore_patterns + ["templates_and_examples/templates"]
+    container_engine = (
+        "docker"
+        if "container_engine" not in configuration
+        else configuration["container_engine"]
+    )
 
-    if (build_mode == "local" or build_mode == "dockerhub") and push_charts:
-        print("build-mode {}: Forcing push_charts = False !".format(build_mode))
-        push_charts = False
-
-    if build_mode == "local" and push_containers:
-        print("local build: Forcing push_containers = False !")
-        push_containers = False
-
-    if build_mode == "dockerhub" and not push_containers:
-        print("Dockerhub build: Forcing push_containers = True !")
-        push_containers = True
-
-    print()
-    print("build_containers: {}".format(build_containers))
-    print("push_containers: {}".format(push_containers))
-    print()
-    print("build_charts: {}".format(build_charts))
-    print("push_charts: {}".format(push_charts))
-
-    if configuration["http_proxy"] == "":
-        http_proxy = os.environ.get("http_proxy", "")
-
-    if http_proxy == "":
-        print("no proxy configured...")
-        http_proxy = None
+    if args.default_registry is not None:
+        default_registry = args.default_registry
     else:
-        print("Using http_proxy: {}".format(http_proxy))
+        default_registry = (
+            configuration["default_registry"]
+            if "default_registry" in configuration
+            else ""
+        )
 
-    if build_containers:
-        print("-----------------------------------------------------------")
-        default_container_registry = configuration["default_container_registry"]
-        if default_container_registry == "" and build_mode != "local":
-            print("No default registry configured!")
-            print("Please specify 'default_container_registry' within the build-configuration.json")
+    http_proxy = conf_http_proxy if conf_http_proxy != "" else None
+    http_proxy = (
+        os.environ.get("http_proxy", "")
+        if http_proxy == None and os.environ.get("http_proxy", None) != None
+        else http_proxy
+    )
+
+    logger.info("")
+    logger.info("-----------------------------------------------------------")
+    logger.info("")
+    logger.info("                       BUILD CONFIG                        ")
+    logger.info("")
+    logger.info("-----------------------------------------------------------")
+    logger.info("")
+    logger.info(f"{http_proxy=}")
+    logger.info(f"{platform_filter=}")
+    logger.info(f"{external_source_dirs=}")
+    logger.info(f"{build_ignore_patterns=}")
+    logger.info(f"{default_registry=}")
+    logger.info(f"{log_level=}")
+    logger.info(f"{exit_on_error=}")
+    logger.info(f"{container_engine=}")
+    logger.info(f"{build_only=}")
+    logger.info(f"{charts_lint=}")
+    logger.info(f"{charts_kubeval=}")
+    logger.info(f"{charts_push=}")
+    logger.info(f"{enable_linting=}")
+    logger.info(f"{containers_push=}")
+    logger.info(f"{container_build=}")
+    logger.info(f"{skip_push_no_changes=}")
+    logger.info(f"{create_offline_installation=}")
+    logger.info(f"{build_installer_scripts=}")
+    logger.info(f"{push_to_microk8s=}")
+    logger.info(f"{build_dir=}")
+    logger.info(f"{kaapana_dir=}")
+    logger.info(f"{no_login=}")
+    logger.info(f"{version_latest=}")
+    logger.info(f"{vulnerability_scan=}")
+    logger.info(f"{vulnerability_severity_level=}")
+    logger.info(f"{create_sboms=}")
+    logger.info(f"{configuration_check=}")
+    logger.info("")
+    logger.info("-----------------------------------------------------------")
+
+    if not build_only and not no_login:
+        if registry_user is None:
+            registry_user = os.getenv("REGISTRY_USER", None)
+        if registry_pwd is None:
+            registry_pwd = os.getenv("REGISTRY_PW", None)
+
+        if registry_user == None or registry_pwd == None:
+            logger.error("REGISTRY CREDENTIALS ERROR:")
+            logger.error(
+                f"{build_only=} -> registry_user == None or registry_pwd == None"
+            )
+            logger.error("You have to either specify --username & --password ")
+            logger.error("Or use the ENVs: 'REGISTRY_USER' & 'REGISTRY_PW' !")
             exit(1)
-        elif default_container_registry == "" and build_mode == "local":
-            default_container_registry = "local"
-        else:
-            print("Using default_container_registry: {}".format(default_container_registry))
-        print("-----------------------------------------------------------")
-        default_container_project = configuration["default_container_project"]
-        if default_container_project == "":
-            print("no default_container_project configured.")
-            default_container_project = None
-        else:
-            print("Using default_container_project: {}".format(default_container_project))
-        print("-----------------------------------------------------------")
 
-    default_chart_registry = configuration["default_chart_registry"] if "default_chart_registry" in configuration else ""
-    default_chart_project = configuration["default_chart_project"] if "default_chart_project" in configuration else ""
-    if build_charts:
-        print("-----------------------------------------------------------")
-        default_chart_registry = configuration["default_chart_registry"]
-        if default_chart_registry == "":
-            print("No default default_chart_registry configured!")
-            print("Please specify 'default_chart_registry' within the build-configuration.json")
-            exit(1)
-        else:
-            print("Using default_chart_registry: {}".format(default_chart_registry))
-        print("-----------------------------------------------------------")
-
-        if push_charts and (registry_user is None or registry_pwd is None):
-            if os.getenv("REGISTRY_USER", None) is None or os.getenv("REGISTRY_PW", None) is None:
-                print()
-                print("ENVs 'REGISTRY_USER' and 'REGISTRY_PW' not found! ")
-                print()
-
-                registry_user = input("User for {}: ".format(default_chart_registry))
-                print()
-                print("Registry-User: {}".format(registry_user))
-                registry_pwd = getpass.getpass("password: ")
-            else:
-                registry_user = os.getenv("REGISTRY_USER", None)
-                registry_pwd = os.getenv("REGISTRY_PW", None)
-
-        default_chart_project = configuration["default_chart_project"]
-        if default_chart_project == "":
-            print("no default_chart_project configured.")
-            default_chart_project = None
-        else:
-            print("Using default_chart_project: {}".format(default_chart_project))
-        print("-----------------------------------------------------------")
-
-    log_level = configuration["log_level"].upper()
     if log_level not in supported_log_levels:
-        print("Log level {} not supported.")
-        print("Please use 'DEBUG','WARN' or 'ERROR' for log_level in build-configuration.json")
+        logger.error(f"Log level {log_level} not supported.")
+        logger.error(
+            "Please use 'DEBUG','WARN' or 'ERROR' for log_level in build-config.yaml"
+        )
         exit(1)
 
-    log_level = supported_log_levels.index(log_level)
+    logger.debug(f"LOG-LEVEL: {log_level}")
+    if log_level == "DEBUG":
+        c_handler.setLevel(logging.DEBUG)
+    elif log_level == "INFO":
+        c_handler.setLevel(logging.INFO)
+    elif log_level == "WARN":
+        c_handler.setLevel(logging.WARNING)
+    elif log_level == "ERROR":
+        c_handler.setLevel(logging.ERROR)
+    else:
+        logger.error(f"Log level {log_level} not identified!")
+        exit(1)
+
+    BuildUtils.init()
+    BuildUtils.kaapana_dir = kaapana_dir
+    BuildUtils.build_dir = build_dir
+    BuildUtils.external_source_dirs = external_source_dirs
+    BuildUtils.build_ignore_patterns = build_ignore_patterns
+    BuildUtils.platform_filter = platform_filter
+    BuildUtils.default_registry = default_registry
+    BuildUtils.http_proxy = http_proxy
+    BuildUtils.exit_on_error = exit_on_error
+    BuildUtils.logger = logger
+    BuildUtils.enable_build_kit = conf_enable_build_kit
+    BuildUtils.create_offline_installation = create_offline_installation
+    BuildUtils.skip_push_no_changes = skip_push_no_changes
+    BuildUtils.parallel_processes = parallel_processes
+    BuildUtils.include_credentials = include_credentials
+    BuildUtils.registry_user = registry_user
+    BuildUtils.registry_pwd = registry_pwd
+    BuildUtils.push_to_microk8s = push_to_microk8s
+    BuildUtils.vulnerability_scan = vulnerability_scan
+    BuildUtils.vulnerability_severity_level = vulnerability_severity_level
+    BuildUtils.configuration_check = configuration_check
+    BuildUtils.configuration_check_severity_level = configuration_check_severity_level
+    BuildUtils.version_latest = version_latest
+    BuildUtils.enable_image_stats = enable_image_stats
+    BuildUtils.create_sboms = create_sboms
+
+    Container.init_containers(
+        container_engine=container_engine,
+        enable_build=container_build,
+        enable_push=containers_push,
+    )
+
+    if not build_only and not no_login:
+        container_registry_login(username=registry_user, password=registry_pwd)
+        helm_registry_login(username=registry_user, password=registry_pwd)
+
+    container_images_available = Container.collect_containers()
+    BuildUtils.add_container_images_available(
+        container_images_available=container_images_available
+    )
+    charts_available = HelmChart.collect_charts()
+
+    init_helm_charts(
+        save_tree=True,
+        enable_push=charts_push,
+        enable_lint=charts_lint,
+        enable_kubeval=charts_kubeval,
+    )
 
     startTime = time()
-    print("-----------------------------------------------------------")
-    if build_containers:
-        print("-----------------------------------------------------------")
-        print("------------------------ CONTAINER ------------------------")
-        print("-----------------------------------------------------------")
-        config_list = (kaapana_dir, http_proxy, default_container_registry, default_container_project)
-        docker_containers_list, logs = start_container_build(config=config_list)
+    logger.info("")
+    logger.info("-----------------------------------------------------------")
+    logger.info("------------------ BUILD PLATFORM CHARTS ------------------")
+    logger.info("-----------------------------------------------------------")
+    logger.info("")
 
-        for log in logs:
-            if supported_log_levels.index(log['loglevel'].upper()) >= log_level:
-                print_log_entry(log, kind="CONTAINERS")
-            if log['loglevel'].upper() == "ERROR":
-                exit(1)
+    HelmChart.generate_platform_build_tree()
 
-        i = 0
-        for docker_container in docker_containers_list:
-            i += 1
-            print()
-            print("Container: {}".format(docker_container.tag.replace(docker_container.docker_registry, "")[1:]))
-            print("{}/{}".format(i, len(docker_containers_list)))
-            print()
-            try:
-                if docker_container.ci_ignore:
-                    print('SKIP {}: CI_IGNORE == True!'.format(docker_container.tag.replace(docker_container.docker_registry, "")[1:]))
-                    continue
-                for log in docker_container.check_prebuild():
-                    print_log_entry(log, kind="CONTAINERS")
-                    if log['loglevel'].upper() == "ERROR":
-                        raise SkipException('SKIP {}: check_prebuild() failed!'.format(log['test']), log=log)
+    # Check charts for configuation errors
+    if BuildUtils.configuration_check:
+        logger.info("")
+        logger.info("-----------------------------------------------------------")
+        logger.info("------------------ CHECK PLATFORM CHARTS ------------------")
+        logger.info("-----------------------------------------------------------")
+        logger.info("")
+        for chart_object in BuildUtils.platform_filter:
+            trivy_utils = TrivyUtils()
+            trivy_utils.check_chart(
+                path_to_chart=os.path.join(BuildUtils.build_dir, chart_object)
+            )
 
-                for log in docker_container.build():
-                    print_log_entry(log, kind="CONTAINERS")
-                    if log['loglevel'].upper() == "ERROR":
-                        raise SkipException('SKIP {}: build() failed!'.format(log['test']), log=log)
+    if len(BuildUtils.issues_list) > 0:
+        logger.info("")
+        logger.info("-----------------------------------------------------------")
+        logger.info("------------------------ ISSUES: --------------------------")
+        logger.info("-----------------------------------------------------------")
+        for issue in BuildUtils.issues_list:
+            component = issue["component"]
+            name = issue["name"]
+            level = issue["level"]
+            log = issue["log"]
+            msg = issue["msg"]
+            timestamp = issue["timestamp"]
+            filepath = issue["filepath"]
+            logger.warning("")
+            logger.warning(f"{level} -> {component}:{name}")
+            logger.warning(f"{msg=}")
+            if len(log) > 0:
+                for line_number, line in log.items():
+                    if not line.isdigit():
+                        logger.warning(line)
+            logger.warning("")
+            logger.warning(
+                "-----------------------------------------------------------"
+            )
 
-                if push_containers:
-                    for log in docker_container.push():
-                        print_log_entry(log, kind="CONTAINERS")
-                        if log['loglevel'].upper() == "ERROR":
-                            raise SkipException('SKIP {}: push() failed!'.format(log['test']), log=log)
-
-            except SkipException as error:
-                print("SkipException: {}".format(str(error)))
-                continue
-
-    if build_charts:
-        print("-----------------------------------------------------------")
-        print("------------------------- CHARTS --------------------------")
-        print("-----------------------------------------------------------")
-
-        print("Init HelmCharts...")
-        init_helm_charts(kaapana_dir=kaapana_dir, chart_registry=default_chart_registry, default_project=default_chart_project)
-
-        print("Start quick_check...")
-        for log_entry in HelmChart.quick_check():
-            if isinstance(log_entry, dict):
-                print_log_entry(log_entry, kind="CHARTS")
-            else:
-                build_ready_list = log_entry
-
-        if push_charts:
-            print("Start check_repos...")
-            for log_entry in HelmChart.check_repos(user=registry_user, pwd=registry_pwd):
-                print_log_entry(log_entry, kind="CHARTS")
-                if log_entry['loglevel'].upper() == "ERROR":
-                    print("Could not add repository: {}".format(log_entry["step"]))
-                    print("Message: {}".format(log_entry["message"]))
-                    exit(1)
-
-        print("Start build- and push-process ...")
-        i = 0
-        for chart in build_ready_list:
-            i += 1
-            try:
-                print()
-                print("chart: {}".format(chart.chart_id))
-                print("{}/{}".format(i, len(build_ready_list)))
-                print()
-                chart.remove_tgz_files()
-                for log_entry in chart.dep_up():
-                    print_log_entry(log_entry, kind="CHARTS")
-                    if log_entry['loglevel'].upper() == "ERROR":
-                        raise SkipException("SKIP {}: dep_up() error!".format(log_entry['test']), log=log_entry)
-
-                for log_entry in chart.lint_chart():
-                    print_log_entry(log_entry, kind="CHARTS")
-                    if log_entry['loglevel'].upper() == "ERROR":
-                        raise SkipException("SKIP {}: dep_up() error!".format(log_entry['test']), log=log_entry)
-
-                for log_entry in chart.lint_kubeval():
-                    print_log_entry(log_entry, kind="CHARTS")
-                    if log_entry['loglevel'].upper() == "ERROR":
-                        raise SkipException("SKIP {}: dep_up() error!".format(log_entry['test']), log=log_entry)
-
-                if "platforms" in chart.chart_dir and create_package:
-                    for log_entry in chart.package():
-                        print_log_entry(log_entry, kind="CHARTS")
-                        if log_entry['loglevel'].upper() == "ERROR":
-                            raise SkipException("SKIP {}: package() error!".format(log_entry['test']), log=log_entry)
-                        else:
-                            packages = glob(os.path.join(os.path.dirname(chart.chart_dir), '*.tgz'))
-                            for package in packages:
-                                copy(package, build_dir)
-                                os.remove(package)
-
-                if push_charts:
-                    for log_entry in chart.push():
-                        print_log_entry(log_entry, kind="CHARTS")
-                        if log_entry['loglevel'].upper() == "ERROR":
-                            raise SkipException("SKIP {}: dep_up() error!".format(log_entry['test']), log=log_entry)
-
-            except SkipException as error:
-                print("SkipException: {}".format(str(error)))
-                continue
-
-    print("-----------------------------------------------------------")
-    if len(log_list["CONTAINERS"]) > 0:
-        print("")
-        print("-----------------------------------------------------------")
-        print("------------------- Container issues: ---------------------")
-        print("-----------------------------------------------------------")
-        print("")
-        for log in log_list["CONTAINERS"]:
-            if supported_log_levels.index(log[0]) >= log_level:
-                print(log[1])
-                print("-----------------------------------------------------------")
-                print()
-    print("-----------------------------------------------------------")
-    if len(log_list["CHARTS"]) > 0:
-        print("")
-        print("-----------------------------------------------------------")
-        print("--------------------- Chart issues: -----------------------")
-        print("-----------------------------------------------------------")
-        print("")
-        for log in log_list["CHARTS"]:
-            if supported_log_levels.index(log[0]) >= log_level:
-                print(log[1])
-                print("-----------------------------------------------------------")
-                print()
-
-    hours, rem = divmod(time()-startTime, 3600)
+    hours, rem = divmod(time() - startTime, 3600)
     minutes, seconds = divmod(rem, 60)
-    print("-----------------------------------------------------------")
-    print("------------------ TIME NEEDED: {:0>2}:{:0>2}:{:0>2} -----------------".format(int(hours), int(minutes), int(seconds)))
-    print("-----------------------------------------------------------")
-    print("-------------------------- DONE ---------------------------")
-    print("-----------------------------------------------------------")
+    logger.info("")
+    logger.info("")
+    logger.info("")
+    logger.info("-----------------------------------------------------------")
+    logger.info(
+        "------------------ TIME NEEDED: {:0>2}:{:0>2}:{:0>2} -----------------".format(
+            int(hours), int(minutes), int(seconds)
+        )
+    )
+    logger.info("-----------------------------------------------------------")
+    logger.info("-------------------------- DONE ---------------------------")
+    logger.info("-----------------------------------------------------------")

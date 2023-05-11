@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: grafana
-  namespace: {{ .Values.global.monitoring_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
 spec:
   replicas: 1
   selector:
@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
       - name: grafana
-        image: {{  .Values.global.registry_url }}{{  .Values.global.registry_project }}/grafana:6.4.4
-        imagePullPolicy:  {{ .Values.global.pull_policy_pods }}
+        image: "{{ .Values.global.registry_url }}/grafana:{{ .Values.global.kaapana_build_version  }}"
+        imagePullPolicy:  {{ .Values.global.pull_policy_images }}
         env:
         # - name: GF_SERVER_ROOT_URL
         #   value: "https://{{ required "A valid hostname (or fqdn) is required!" .Values.global.hostname }}/grafana"
@@ -26,17 +26,17 @@ spec:
         # - name: GF_AUTH_ANONYMOUS_ORG_NAME
         #   value: "Main Org."
         - name: GF_SECURITY_ADMIN_PASSWORD
-          value: {{ .Values.global.credentials.grafana_password }}
+          value: {{ .Values.global.credentials_grafana_password }}
         - name: GF_SECURITY_ADMIN_USER
-          value: {{ .Values.global.credentials.grafana_username }}
+          value: {{ .Values.global.credentials_grafana_username }}
         ports:
         - containerPort: 3000
           protocol: TCP
         resources:
           requests:
-            memory: 50Mi
-          limits:
             memory: 100Mi
+          limits:
+            memory: 500Mi
         volumeMounts:
           - name: grafana-config-file
             mountPath: /etc/grafana/grafana.ini
@@ -55,6 +55,12 @@ spec:
           - name: grafana-prometheus-dashboard
             mountPath: /etc/grafana/dashboards/prometheus/dashboards/prometheus-dashboard.json
             subPath: prometheus-dashboard.json
+          - name: grafana-airflow-cluster-dashboard
+            mountPath: /etc/grafana/dashboards/prometheus/dashboards/airflow-cluster-dashboard.json
+            subPath: airflow-cluster-dashboard.json
+          - name: grafana-airflow-dag-dashboard
+            mountPath: /etc/grafana/dashboards/prometheus/dashboards/airflow-dag-dashboard.json
+            subPath: airflow-dag-dashboard.json
           {{- if .Values.global.gpu_support }}
           - name: grafana-gpu-dashboard
             mountPath: /etc/grafana/dashboards/gpu/dashboards/gpu-dashboard.json
@@ -108,5 +114,17 @@ spec:
           items:
           - key: prometheus-dashboard.json
             path: prometheus-dashboard.json
+      - name: grafana-airflow-cluster-dashboard
+        configMap:
+          name: grafana-dashboards
+          items:
+          - key: airflow-cluster-dashboard.json
+            path: airflow-cluster-dashboard.json
+      - name: grafana-airflow-dag-dashboard
+        configMap:
+          name: grafana-dashboards
+          items:
+          - key: airflow-dag-dashboard.json
+            path: airflow-dag-dashboard.json
       imagePullSecrets:
         - name: registry-secret
