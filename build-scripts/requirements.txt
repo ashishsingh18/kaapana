@@ -1,4 +1,9 @@
-pyyaml
 treelib
 networkx[default]
 jinja2
+GitPython==3.1.42
+semver
+alive-progress
+requests>=2.26.0
+urllib3>=1.26.0
+pyyaml>=5.4.1

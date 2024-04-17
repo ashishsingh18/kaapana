@@ -1,8 +1,19 @@
 ---
 global:
-    registry_url: ""
-    pull_policy_pods: ""
-    base_namespace: ""
-    fast_data_dir: ""
-    slow_data_dir: ""
-mount_path: ""
+  registry_url: ""
+  pull_policy_images: ""
+  base_namespace: ""
+  fast_data_dir: ""
+  slow_data_dir: ""
+  namespace: "{{ .Values.global.services_namespace }}"
+  dynamicVolumes:
+  - name: tb-dedicated
+    mount_path: /kaapana/mounted/tb-logs/tensorboard
+    host_path: /tensorboard
+  - name: tb-workflow-data
+    mount_path: /kaapana/mounted/tb-logs/data
+    host_path: /workflows/data
+  - name: tb-minio
+    mount_path: /kaapana/mounted/tb-logs/minio
+    host_path: /applications/tensorboard
+    minio_mirror : true

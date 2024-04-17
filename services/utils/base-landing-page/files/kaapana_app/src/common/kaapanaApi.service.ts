@@ -1,11 +1,13 @@
 import Vue from 'vue'
-import request from '@/request.ts'
-import AuthService from '@/common/auth.service.ts'
+import request from '@/request'
+import AuthService from '@/common/auth.service'
+import routes from '@/routes/routes'
 
-const kaapanaApiService = {
 
-  helmApiPost(subUrl: any, payload: any) {
+
+  const helmApiPost = (subUrl: any, payload: any, timeout: any = 10000) => {
     return new Promise((resolve, reject) => {
+      request.defaults.timeout = timeout
       request.post('/kube-helm-api' + subUrl, payload).then((response: any) => {
         console.log(response)
         resolve(response)
@@ -14,10 +16,11 @@ const kaapanaApiService = {
         reject(error)
       })
     })
-  },
+  }
 
-  helmApiGet(subUrl: any, params: any) {
+  const helmApiGet = (subUrl: any, params: any, timeout: any = 10000) => {
     return new Promise((resolve, reject) => {
+      request.defaults.timeout = timeout
       request.get('/kube-helm-api' + subUrl, { params }).then((response: any) => {
         resolve(response)
       }).catch((error: any) => {
@@ -25,9 +28,20 @@ const kaapanaApiService = {
         reject(error)
       })
     })
-  },
+  }
 
-  getExternalWebpages() {
+  const getPolicyData = () => {
+    return new Promise((resolve, reject) => {
+      request.get('/kaapana-backend/open-policy-data').then((response: { data: any }) => {
+        const policyData = response.data
+        resolve(policyData)
+      }).catch((error:any) => {
+        console.log('Something went wrong with open policy agent ', error)
+      })
+    })
+  }
+
+  const getExternalWebpages = () => {
     return new Promise((resolve, reject) => {
 
 
@@ -48,22 +62,18 @@ const kaapanaApiService = {
             }
           }
         }
-
-        let traefikUrl = ''
-        if (Vue.config.productionTip === true) {
-          traefikUrl = '/traefik/api/http/routers'
-        } else {
-          traefikUrl = '/jsons/testingTraefikResponse.json'
-        }
-
-        request.get(traefikUrl).then((response: { data: {} }) => {
+        
+        
+        //// The following section checks, if the routes listed in the config file externalWebpages.json is also available, enabled and correctly configured in traefik.
+        //// I.E. if there is a service in traefik that routes to the configured endpoint
+        request.get('/kaapana-backend/get-traefik-routes').then((response: { data: {} }) => {
           trainingJson = response.data
 
           for (const key1 in externalWebpages) {
             if (externalWebpages.hasOwnProperty(key1)) {
               for (const key2 in externalWebpages[key1].subSections) {
                 if (externalWebpages[key1].subSections.hasOwnProperty(key2)) {
-                  if (!this.checkUrl(trainingJson, externalWebpages[key1].subSections[key2].endpoint)) {
+                  if (!checkUrl(trainingJson, externalWebpages[key1].subSections[key2].endpoint)) {
                     delete externalWebpages[key1].subSections[key2]
                   }
                 }
@@ -71,26 +81,27 @@ const kaapanaApiService = {
             }
           }
         }).then(() => {
-
-          let kibanaDashboardsUrl = '/flow/kaapana/api/get-kibana-dashboards'
-          request.get(kibanaDashboardsUrl)
+          
+          //// Get a list of the available dashboards in opensearch and add them as subsections to the meta section.
+          let osDashboardsUrl = '/kaapana-backend/get-os-dashboards'
+          request.get(osDashboardsUrl)
             .then((response: { data: any }) => {
               var dashboards = response.data['dashboards']
-              const kibanaSubsections: { [k: string]: any } = {};
-              dashboards.forEach((title: any, index: any) => {
-                kibanaSubsections['kibana' + String(index)] =
+              const osDashboardsSubsections: { [k: string]: any } = {};
+              dashboards.forEach((title: string, index: any) => {
+                osDashboardsSubsections['osdashboard' + String(index)] =
                 {
                   label: title,
-                  linkTo: location.protocol + '//' + location.host + '/meta/app/kibana#/dashboards?title=' + title + '&embed=true&_g=()',
+                  linkTo: location.protocol + '//' + location.host + '/meta/app/dashboards#?title=' + title + '&embed=true&_g=()',
                 }
               });
 
-              externalWebpages.meta.subSections = Object.assign(externalWebpages.meta.subSections, kibanaSubsections) // might not work in all browsers
+              externalWebpages.meta.subSections = Object.assign(externalWebpages.meta.subSections, osDashboardsSubsections) // might not work in all browsers
 
               resolve(externalWebpages)
 
             }).catch((err: any) => {
-              console.log('Something went wrong with kibana', err)
+              console.log('Something went wrong with OpenSearch Dashboards', err)
               resolve(externalWebpages)
             })
         }).catch((error: any) => {
@@ -103,8 +114,8 @@ const kaapanaApiService = {
         // reject(error)
       })
     })
-  },
-  checkUrl(trainingJson: any, endpoint: any) {
+  }
+  const checkUrl = (trainingJson: any, endpoint: any) => {
     let availableRoute = false
     for (const routes in trainingJson) {
       if (trainingJson[routes]['status'] == 'enabled') {
@@ -114,140 +125,11 @@ const kaapanaApiService = {
       }
     }
     return availableRoute
-  },
+  }
 
-  federatedClientApiPost(subUrl: any, payload: any = null, params: any=null) {
+  const federatedClientApiPost = (subUrl: any, payload: any = null, params: any=null) => {
     return new Promise((resolve, reject) => {
-      request.post('/federated-backend/client' + subUrl, payload, { params: params}).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-  federatedClientApiGet(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      request.get('/federated-backend/client' + subUrl, { params }).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-  federatedSchemaApiPost(subUrl: any, payload: any = null, params: any=null) {
-    return new Promise((resolve, reject) => {
-      request.post('/federated-backend/json-schemas' + subUrl, payload, { params: params}).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-  federatedSchemaApiGet(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      request.get('/federated-backend/json-schemas' + subUrl, { params }).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-
-  federatedClientApiPut(subUrl: any, payload: any=null, params: any=null) {
-    return new Promise((resolve, reject) => {
-      request.put('/federated-backend/client' + subUrl,  payload, { params: params }).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-  federatedClientApiDelete(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      request.delete('/federated-backend/client' + subUrl, { params: params} ).then((response: any) => {
-        resolve(response)
-      }).catch((error: any) => {
-        console.log('Failed: ' + error.response.data)
-        reject(error)
-      })
-    })
-  },
-
-  federatedRemoteApiPut(subUrl: any, payload: any = null,  params: any=null) {
-    return new Promise((resolve, reject) => {
-      AuthService.getFederatedHeaders().then((response: any) =>  {
-        request.put('/federated-backend/remote' + subUrl, payload, { params: params, headers: response}).then((response: any) => {
-          resolve(response)
-        }).catch((error: any) => {
-          console.log('Failed: ' + error.response.data)
-          reject(error)
-        })
-      }).catch((error: any) => {
-        console.log(error);
-        reject(error)
-      });
-    })
-  },
-
-  federatedRemoteApiPost(subUrl: any, payload: any=null, params: any=null) {
-    return new Promise((resolve, reject) => {
-      AuthService.getFederatedHeaders().then((response: any) =>  {
-        request.post('/federated-backend/remote' + subUrl, payload, {params: params, headers: response}).then((response: any) => {
-          resolve(response)
-        }).catch((error: any) => {
-          console.log('Failed: ' + error.response.data)
-          reject(error)
-        })
-      }).catch((error: any) => {
-        console.log(error);
-        reject(error)
-      });
-    })
-  },
-
-  federatedRemoteApiGet(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      AuthService.getFederatedHeaders().then((response: any) =>  {
-        request.get('/federated-backend/remote' + subUrl, { params , headers: response}).then((response: any) => {
-          resolve(response)
-        }).catch((error: any) => {
-          console.log('Failed: ' + error.response.data)
-          reject(error)
-        })
-      }).catch((error: any) => {
-        console.log(error);
-        reject(error)
-      });
-    })
-  },
-  federatedRemoteApiDelete(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      AuthService.getFederatedHeaders().then((response: any) =>  {
-        request.delete('/federated-backend/remote' + subUrl, { params , headers: response}).then((response: any) => {
-          resolve(response)
-        }).catch((error: any) => {
-          console.log('Failed: ' + error.response.data)
-          reject(error)
-        })
-      }).catch((error: any) => {
-        console.log(error);
-        reject(error)
-      });
-    })
-  },
-  kaapanaApiGet(subUrl: any, params: any = null) {
-    return new Promise((resolve, reject) => {
-      request.get('/flow/kaapana/api/' + subUrl, { params }).then((response: any) => {
+      request.post('/kaapana-backend/client' + subUrl, payload, { params: params}).then((response: any) => {
         resolve(response)
       }).catch((error: any) => {
         console.log('Failed: ' + error.response.data)
@@ -255,6 +137,144 @@ const kaapanaApiService = {
       })
     })
   }
-}
+
+  const federatedClientApiGet = (subUrl: any, params: any = null) => {
+    return new Promise((resolve, reject) => {
+      request.get('/kaapana-backend/client' + subUrl, { params }).then((response: any) => {
+        resolve(response)
+      }).catch((error: any) => {
+        console.log('Failed: ' + error.response.data)
+        reject(error)
+      })
+    })
+  }
+
+  const federatedClientApiPut = (subUrl: any, payload: any=null, params: any=null) => {
+    return new Promise((resolve, reject) => {
+      request.put('/kaapana-backend/client' + subUrl,  payload, { params: params }).then((response: any) => {
+        resolve(response)
+      }).catch((error: any) => {
+        console.log('Failed: ' + error.response.data)
+        reject(error)
+      })
+    })
+  }
+
+  const federatedClientApiDelete = (subUrl: any, params: any = null) => {
+    return new Promise((resolve, reject) => {
+      request.delete('/kaapana-backend/client' + subUrl, { params: params} ).then((response: any) => {
+        resolve(response)
+      }).catch((error: any) => {
+        console.log('Failed: ' + error.response.data)
+        reject(error)
+      })
+    })
+  }
+
+  const federatedRemoteApiPut = (subUrl: any, payload: any = null,  params: any=null) => {
+    return new Promise((resolve, reject) => {
+      AuthService.getFederatedHeaders().then((response: any) =>  {
+        request.put('/kaapana-backend/remote' + subUrl, payload, { params: params, headers: response}).then((response: any) => {
+          resolve(response)
+        }).catch((error: any) => {
+          console.log('Failed: ' + error.response.data)
+          reject(error)
+        })
+      }).catch((error: any) => {
+        console.log(error);
+        reject(error)
+      });
+    })
+  }
+
+  const federatedRemoteApiPost = (subUrl: any, payload: any=null, params: any=null) => {
+    return new Promise((resolve, reject) => {
+      AuthService.getFederatedHeaders().then((response: any) =>  {
+        request.post('/kaapana-backend/remote' + subUrl, payload, {params: params, headers: response}).then((response: any) => {
+          resolve(response)
+        }).catch((error: any) => {
+          console.log('Failed: ' + error.response.data)
+          reject(error)
+        })
+      }).catch((error: any) => {
+        console.log(error);
+        reject(error)
+      });
+    })
+  }
+
+  const federatedRemoteApiGet = (subUrl: any, params: any = null) => {
+    return new Promise((resolve, reject) => {
+      AuthService.getFederatedHeaders().then((response: any) =>  {
+        request.get('/kaapana-backend/remote' + subUrl, { params , headers: response}).then((response: any) => {
+          resolve(response)
+        }).catch((error: any) => {
+          console.log('Failed: ' + error.response.data)
+          reject(error)
+        })
+      }).catch((error: any) => {
+        console.log(error);
+        reject(error)
+      });
+    })
+  }
+  const federatedRemoteApiDelete = (subUrl: any, params: any = null) => {
+    return new Promise((resolve, reject) => {
+      AuthService.getFederatedHeaders().then((response: any) =>  {
+        request.delete('/kaapana-backend/remote' + subUrl, { params , headers: response}).then((response: any) => {
+          resolve(response)
+        }).catch((error: any) => {
+          console.log('Failed: ' + error.response.data)
+          reject(error)
+        })
+      }).catch((error: any) => {
+        console.log(error);
+        reject(error)
+      });
+    })
+  }
+  const kaapanaApiGet = (subUrl: any, params: any = null) => {
+    return new Promise((resolve, reject) => {
+      request.get('/kaapana-backend/' + subUrl, { params }).then((response: any) => {
+        resolve(response)
+      }).catch((error: any) => {
+        console.log('Failed: ' + error.data)
+        reject(error)
+      })
+    })
+  }
+
+  const syncRemoteInstances = () => {
+        return federatedClientApiGet("/check-for-remote-updates")
+        .then((response) => {
+          Vue.notify({
+            type: 'success',
+            title: 'Successfully checked for remote updates',
+            // text: 
+          })
+          return true
+        })
+        .catch((err) => {
+          console.log(err);
+          // return false
+        });
+    }
+  const kaapanaApiService = {
+    helmApiPost,
+    helmApiGet,
+    getPolicyData,
+    getExternalWebpages,
+    checkUrl,
+    federatedClientApiPost,
+    federatedClientApiGet,
+    federatedClientApiPut,
+    federatedClientApiDelete,
+    federatedRemoteApiPut,
+    federatedRemoteApiPost,
+    federatedRemoteApiGet,
+    federatedRemoteApiDelete,
+    kaapanaApiGet,
+    syncRemoteInstances
+  }
 
 export default kaapanaApiService

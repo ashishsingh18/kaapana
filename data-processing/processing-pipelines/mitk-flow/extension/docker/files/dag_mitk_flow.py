@@ -1,18 +1,14 @@
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.dates import days_ago
-from airflow.utils.trigger_rule import TriggerRule
 from datetime import timedelta
 from airflow.models import DAG
-from mitk_flow.MitkInputOperator import MitkInputOperator
+from mitk_flow.LocalMiktInputOperator import LocalMiktInputOperator
 from kaapana.operators.LocalWorkflowCleanerOperator import LocalWorkflowCleanerOperator
 from kaapana.operators.LocalGetInputDataOperator import LocalGetInputDataOperator
 from kaapana.operators.KaapanaApplicationOperator import KaapanaApplicationOperator
 from kaapana.operators.DcmSendOperator import DcmSendOperator
+from kaapana.blueprints.kaapana_global_variables import KAAPANA_BUILD_VERSION
 
-
-from datetime import datetime
-
-import os
 
 log = LoggingMixin().log
 
@@ -31,37 +27,40 @@ ui_forms = {
                 "default": False,
                 "readOnly": False,
             }
-        }
+        },
     }
 }
 
 args = {
-    'ui_visible': True,
-    'ui_forms': ui_forms,
-    'owner': 'kaapana',
-    'start_date': days_ago(0),
-    'retries': 1,
-    'retry_delay': timedelta(seconds=30)
+    "ui_visible": True,
+    "ui_forms": ui_forms,
+    "owner": "kaapana",
+    "start_date": days_ago(0),
+    "retries": 1,
+    "retry_delay": timedelta(seconds=30),
 }
 
 dag = DAG(
-    dag_id='mitk-flow',
+    dag_id="mitk-flow",
     default_args=args,
     concurrency=10,
     max_active_runs=5,
-    schedule_interval=None
+    schedule_interval=None,
 )
 
 get_input = LocalGetInputDataOperator(dag=dag)
-mitk_input = MitkInputOperator(dag=dag, input_operator=get_input)
+mitk = LocalMiktInputOperator(
+    dag=dag, input_operator=get_input, operator_out_dir="mitk-results"
+)
+launch_app = KaapanaApplicationOperator(
+    dag=dag,
+    name="application-mitk-flow",
+    input_operator=get_input,
+    chart_name="mitk-flow-chart",
+    version=KAAPANA_BUILD_VERSION,
+)
 
-launch_app = KaapanaApplicationOperator(dag=dag,
-                                        name="application-mitk-flow",
-                                        input_operator=mitk_input,
-                                        chart_name='mitk-flow-chart',
-                                        version='2022.04')
-send_dicom = DcmSendOperator(dag=dag, input_operator=launch_app, ae_title="MITK-flow")
+send_dicom = DcmSendOperator(dag=dag, ae_title="MITK-flow", input_operator=mitk)
 clean = LocalWorkflowCleanerOperator(dag=dag)
 
-
-get_input >> mitk_input >> launch_app >> send_dicom >> clean
+get_input >> mitk >> launch_app >> send_dicom >> clean

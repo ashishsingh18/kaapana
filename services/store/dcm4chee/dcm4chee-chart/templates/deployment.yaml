@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dcm4chee
-  namespace: {{ .Values.global.store_namespace }}
+  namespace: "{{ .Values.global.services_namespace }}"
 spec:
   replicas: 1
   selector:
@@ -16,28 +16,43 @@ spec:
     spec:
       initContainers:
       - name: init
-        image: {{ .Values.global.registry_url }}/service-checker:{{ .Values.global.platform_abbr | default "uk" }}_{{ .Values.global.platform_version | default "0" }}__1.1
-        imagePullPolicy:  {{ .Values.global.pull_policy_jobs }}
+        image: "{{ .Values.global.registry_url }}/service-checker:{{ .Values.global.kaapana_build_version  }}"
+        imagePullPolicy:  {{ .Values.global.pull_policy_images }}
         env:
           - name: WAIT
-            value: "ldap,ldap-service.store.svc,389;postgres-dcm4che,postgres-dcm4che-service.store.svc,5432"
+            value: "ldap,ldap-service.{{  .Values.global.services_namespace  }}.svc,389;postgres-dcm4che,postgres-dcm4che-service.{{  .Values.global.services_namespace  }}.svc,5432"
           - name: DELAY
             value: "2"
           - name: TIMEOUT
             value: "10"
       containers:
+        - image: "{{ .Values.global.registry_url }}/dcm4chee-nginx:{{ .Values.global.kaapana_build_version  }}"
+          imagePullPolicy: {{ .Values.global.pull_policy_images }}
+          name: dcm4chee-nginx
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              cpu: 300m
+              memory: 512Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+          - mountPath: /etc/nginx/conf.d
+            name: nginx-conf
         - name: dcm4chee-container
-          image: {{ .Values.global.registry_url }}/dcm4chee-arc:{{ .Values.global.platform_abbr | default "uk" }}_{{ .Values.global.platform_version | default "0" }}__5.26.0
-          imagePullPolicy:  {{ .Values.global.pull_policy_pods }}
+          image: "{{ .Values.global.registry_url }}/dcm4chee-arc:{{ .Values.global.kaapana_build_version  }}"
+          imagePullPolicy:  {{ .Values.global.pull_policy_images }}
           env:
           - name: ARCHIVE_DEVICE_NAME
             value: KAAPANA
           - name: LDAP_URL
-            value: ldap://ldap-service.store.svc:389
+            value: ldap://ldap-service.{{  .Values.global.services_namespace  }}.svc:389
           - name: LDAP_ROOTPASS
             value: secret
           - name: POSTGRES_HOST
-            value: postgres-dcm4che-service.store.svc
+            value: postgres-dcm4che-service.{{  .Values.global.services_namespace  }}.svc
           - name: POSTGRES_PORT
             value: "5432"
           - name: POSTGRES_DB
@@ -47,7 +62,7 @@ spec:
           - name: POSTGRES_PASSWORD
             value: pacs
           - name: HTTP_PORT
-            value: "8080"
+            value: "8081"
           - name: HTTPS_PORT
             value: "8443"
           - name: STORAGE_DIR
@@ -55,9 +70,13 @@ spec:
           - name: WILDFLY_CHOWN
             value: /opt/wildfly/standalone /storage
           - name: WILDFLY_WAIT_FOR
-            value: ldap-service.store.svc:389 postgres-dcm4che-service.store.svc:5432
+            value: ldap-service.{{  .Values.global.services_namespace  }}.svc:389 postgres-dcm4che-service.{{  .Values.global.services_namespace  }}.svc:5432
           - name: TZ
             value: Europe/Paris
+          - name: WILDFLY_CRON_ENABLED
+            value: "true"
+          - name: WILDFLY_LOG_RETENTION_DAYS
+            value: "7"
           # - name: GELF_LEVEL
           #   value: INFO
           # - name: AUTH_SERVER_URL
@@ -67,7 +86,7 @@ spec:
           # - name: UI_CLIENT_ID
           #   value: jip
           ports:
-            - containerPort: 8080
+            # - containerPort: 8080
             - containerPort: 8443
             - containerPort: 9990
             - containerPort: 11112
@@ -75,7 +94,7 @@ spec:
           livenessProbe:
             httpGet:
               path: /dcm4chee-arc/ui2
-              port: 8080
+              port: 8081
             initialDelaySeconds: 30
             periodSeconds: 120
           resources:
@@ -88,15 +107,22 @@ spec:
               name: standalone-data
             - mountPath: /storage
               name: storage-data
+          securityContext:
+            allowPrivilegeEscalation: false
       volumes:
         - name: standalone-data
-          hostPath:
-            path: {{ .Values.global.fast_data_dir }}/dcm4che/server_data
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: dcm4chee-standalone-pv-claim
         - name: storage-data
-          hostPath:
-            path: {{ .Values.global.slow_data_dir }}/dcm4che/dicom_data
-            type: DirectoryOrCreate
+          persistentVolumeClaim:
+            claimName: dcm4chee-dicom-pv-claim
+        - name: nginx-conf
+          configMap: 
+            name: nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+      priorityClassName: kaapana-high-priority
       imagePullSecrets:
       - name: registry-secret
 ---

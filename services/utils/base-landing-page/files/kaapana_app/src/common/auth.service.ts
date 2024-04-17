@@ -1,5 +1,5 @@
 import Vue from 'vue'
-import request from '@/request.ts'
+import request from '@/request'
 
 const AuthService = {
   getToken() {
@@ -20,12 +20,11 @@ const AuthService = {
     })
   },
   logout() {
-    location.href = '/oauth2/sign_out?rd=/auth/realms/kaapana/protocol/openid-connect/logout'
-    //location.href = '/oauth/logout' // without redirect since redirect lead often to the error page and people had to renter the url
+    location.href = '/kaapana-backend/oidc-logout'
   },
   getFederatedHeaders() {
     return new Promise((resolve, reject) => {
-      request.get('/federated-backend/client/client-kaapana-instance').then((response: any) =>  {
+      request.get('/kaapana-backend/client/kaapana-instance').then((response: any) =>  {
         resolve({
           FederatedAuthorization: response.data['token']
         })

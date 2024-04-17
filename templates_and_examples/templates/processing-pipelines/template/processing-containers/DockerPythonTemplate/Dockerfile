@@ -1,15 +1,12 @@
 # # With cuda
-# FROM nvcr.io/nvidia/pytorch:20.09-py3
+FROM local-only/base-python-gpu:latest
 
 # Without cuda
-FROM local-only/base-python-alpine:0.1.0
+FROM local-only/base-python-cpu:latest
 
 LABEL IMAGE="python-template"
 LABEL VERSION="0.1.0"
-LABEL CI_IGNORE="True"
-
-COPY files/requirements.txt /src
-RUN pip3 install -r /src/requirements.txt
+LABEL BUILD_IGNORE="True"
 
 COPY files/start.py /
 

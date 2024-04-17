@@ -1,27 +1,37 @@
-FROM local-only/base-landing-page:0.1.1  as build-stage
+FROM local-only/base-landing-page:latest as build-stage
 
 LABEL IMAGE="landing-page-kaapana"
-LABEL VERSION="0.1.3"
-LABEL CI_IGNORE="False"
+LABEL VERSION="0.2.1"
+LABEL BUILD_IGNORE="False"
 
-RUN npm run build
 
-# # # ###############################
-# # # ############# Dev #############
-# # # ###############################
-# # # # In the landing-page deployment, adjust the resource limits to at least 12Gi and change the docker image to the one you are pushing 
-# WORKDIR / 
-# COPY files/dev.sh .
-# # RUN chmod +x dev.sh
-# CMD ["/bin/sh", "dev.sh"]
-# # ###############################
+################################
+######### Development ##########
+################################
+# USER 0
+# RUN chown 1000 /kaapana/app && \
+#     ln -s /kaapana/app/jsons /kaapana/app/public && \
+#     ln -s /kaapana/app/thumbnails /kaapana/app/public && \
+#     chown -R 1000:1000 /kaapana/app/public
+# USER 1000
+
+# WORKDIR /kaapana/app
+# RUN npm run build
+# CMD ["npm", "run", "serve"]
+
 
 ###############################
 ######### Production ##########
 ###############################
-FROM nginx:1.19.3-alpine
+WORKDIR /kaapana/app
+RUN npm run build
 
-RUN mkdir /app
-COPY --from=build-stage /landing/app/dist /app
-COPY --from=build-stage /landing/app/nginx.conf /etc/nginx/nginx.conf
+FROM nginxinc/nginx-unprivileged:1.25.3-alpine
+WORKDIR /kaapana/app
 
+COPY --from=build-stage /kaapana/app/dist /kaapana/app
+COPY --from=build-stage /kaapana/app/nginx.conf /etc/nginx/nginx.conf
+USER 0
+RUN chown 1000 /etc/nginx/nginx.conf
+
+USER 1000

@@ -1,4 +1,8 @@
 ---
 global:
-    pull_policy_pods: "IfNotPresent"
-    base_namespace: "default"
+  dev_files: false
+  dynamicVolumes:
+  - name: minio-thumbnails
+    mount_path: /kaapana/app/thumbnails/
+    host_path: /minio-thumbnails
+    storage: "1Gi"

@@ -17,10 +17,9 @@
 
 import kubernetes
 from kaapana.kubetools.resources import Resources
-import uuid
 
 
-class Pod():
+class Pod:
     """
     Represents a kubernetes pod and manages execution of a single pod.
     :param image: The docker image
@@ -43,32 +42,34 @@ class Pod():
     """
 
     def __init__(
-            self,
-            image,
-            envs,
-            cmds,
-            app_name=None,
-            args=None,
-            api_version='v1',
-            kind='Pod',
-            secrets=None,
-            labels=None,
-            node_selectors=None,
-            name=None,
-            volumes=None,
-            volume_mounts=None,
-            namespace='default',
-            result=None,
-            image_pull_policy='IfNotPresent',
-            image_pull_secrets=None,
-            init_containers=None,
-            service_account_name=None,
-            resources=None,
-            annotations=None,
-            restart_policy='Never',
-            affinity=None
+        self,
+        image,
+        envs,
+        cmds,
+        app_name=None,
+        args=None,
+        api_version="v1",
+        kind="Pod",
+        secrets=None,
+        labels=None,
+        node_selectors=None,
+        name=None,
+        volumes=None,
+        volume_mounts=None,
+        namespace="default",
+        result=None,
+        image_pull_policy="IfNotPresent",
+        image_pull_secrets=None,
+        priority=None,
+        priority_class_name=None,
+        init_containers=None,
+        service_account_name=None,
+        resources=None,
+        annotations=None,
+        restart_policy="Never",
+        affinity=None,
+        tolerations=None,
     ):
-
         self.image = image
         self.envs = envs or {}
         self.cmds = cmds
@@ -85,15 +86,18 @@ class Pod():
         self.namespace = namespace
         self.image_pull_policy = image_pull_policy
         self.image_pull_secrets = image_pull_secrets
+        self.priority = priority
+        self.priority_class_name = priority_class_name
         self.init_containers = init_containers
         self.service_account_name = service_account_name
         self.resources = resources or Resources()
         self.annotations = annotations or {}
         self.restart_policy = restart_policy
         self.affinity = affinity or {}
-        self.last_kube_status = None 
+        self.last_kube_status = None
         self.last_af_status = None
         self.task_instance = None
+        self.tolerations = tolerations or []
 
     def get_kube_object(self):
         pod_api_version = self.api_version
@@ -101,25 +105,35 @@ class Pod():
 
         # metadata
         pod_metadata = kubernetes.client.V1ObjectMeta()
-        pod_metadata.name = self.name 
+        pod_metadata.name = self.name
         pod_metadata.namespace = self.namespace
         pod_metadata.labels = self.labels
 
         # spec
         pod_spec = kubernetes.client.V1PodSpec(containers=[])
-        pod_spec.restart_policy=self.restart_policy
+        pod_spec.restart_policy = self.restart_policy
 
+        if self.priority_class_name is not None:
+            pod_spec.priority_class_name = self.priority_class_name
+
+        if self.priority is not None:
+            pod_spec.priority = self.priority
 
         # spec - node_selector
         if self.node_selectors is not None and len(self.node_selectors) is not 0:
             pod_spec.node_selector = self.node_selectors
+
+        # spec - tolerations
+        if self.tolerations is not None and len(self.tolerations) is not 0:
+            pod_spec.tolerations = self.tolerations
 
         # spec - init_container
         if self.init_containers is not None:
             config = self.init_containers
             pod_spec.init_containers = []
             pod_init_container = kubernetes.client.V1Container(
-                name=self.name+"-init-container")
+                name=self.name + "-init-container"
+            )
             if "cmds" in config:
                 pod_init_container.command = config["cmds"]
             if "args" in config:
@@ -134,10 +148,9 @@ class Pod():
 
             pod_init_container.volume_mounts = []
 
-            #spec - init_container - volume_mounts
+            # spec - init_container - volume_mounts
             for volume_mount in self.volume_mounts:
-                pod_init_container.volume_mounts.append(
-                    volume_mount.get_kube_object())
+                pod_init_container.volume_mounts.append(volume_mount.get_kube_object())
 
             pod_spec.init_containers.append(pod_init_container)
 
@@ -150,17 +163,17 @@ class Pod():
         pod_container.env = self.get_envs()
         pod_container.image = self.image
         pod_container.image_pull_policy = self.image_pull_policy
+        pod_container.image_pull_policy = self.image_pull_policy
 
         pod_container.resources = self.resources.get_kube_object()
         pod_container.volume_mounts = []
 
-        #spec - container - volume_mounts
+        # spec - container - volume_mounts
         for volume_mount in self.volume_mounts:
             pod_container.volume_mounts.append(volume_mount.get_kube_object())
 
         for secret in self.secrets:
-            pod_container.volume_mounts.append(
-                secret.get_kube_object_volume_mount())
+            pod_container.volume_mounts.append(secret.get_kube_object_volume_mount())
 
         pod_spec.containers.append(pod_container)
 
@@ -182,7 +195,12 @@ class Pod():
         pod_status = kubernetes.client.V1PodStatus()
 
         kube_pod = kubernetes.client.V1Pod(
-            api_version=pod_api_version, kind=pod_kind, metadata=pod_metadata, spec=pod_spec, status=pod_status)
+            api_version=pod_api_version,
+            kind=pod_kind,
+            metadata=pod_metadata,
+            spec=pod_spec,
+            status=pod_status,
+        )
 
         return kube_pod
 

@@ -1,41 +1,19 @@
-FROM nvcr.io/nvidia/pytorch:22.02-py3
-# FROM pytorchlightning/pytorch_lightning:base-cuda-py3.9-torch1.11
+FROM local-only/base-python-cpu:latest
 
 LABEL REGISTRY="local-only"
 LABEL IMAGE="base-python-gpu"
-LABEL VERSION="0.1.0"
-LABEL CI_IGNORE="False"
+LABEL VERSION="latest"
+LABEL BUILD_IGNORE="False"
 
-ENV DEBIAN_FRONTEND=noninteractive
+ARG CUDA_VERSION
+LABEL com.nvidia.volumes.needed="nvidia_driver"
+ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
+ENV LD_LIBRARY_PATH /usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    htop \
-    zip \
-    unzip \
-    nano \
-    pandoc \
-    texlive-xetex \
-    texlive-fonts-recommended \
-    texlive-plain-generic \
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
-# pandoc and texlive-packages only for jupyternotebook: jupyter nbconvert --to html --no-input ...
 
-# Common Python packages
-RUN python -m pip install --upgrade pip
-COPY files/requirements.txt /root/
-RUN pip3 install -r /root/requirements.txt
 
-# Code server
-RUN wget https://code-server.dev/install.sh
-RUN /bin/bash install.sh --version 4.2.0
-RUN code-server --install-extension ms-python.python
-
-# Juyterlab
-# Disable security token for Jupyter lab
-RUN jupyter-lab --generate-config \
- && sed -i "s/^.*ServerApp.token.*$/c.ServerApp.token = ''/g" /root/.jupyter/jupyter_lab_config.py
-COPY files/jupyterlab.sh /
-COPY files/kaapana_federated /kaapana_federated
-
-WORKDIR /kaapanasrc
+WORKDIR /kaapana/app

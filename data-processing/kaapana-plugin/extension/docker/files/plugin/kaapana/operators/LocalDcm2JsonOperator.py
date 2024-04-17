@@ -1,36 +1,30 @@
-# -*- coding: utf-8 -*-
-
-import subprocess
 import os
-import fnmatch
 import json
-import yaml
+from typing import Dict, List
+import pydicom
 from pathlib import Path
-import shutil
-import pathlib
 from datetime import datetime
 from dateutil import parser
 import pytz
 import traceback
 import logging
-import glob
-from shutil import copyfile, rmtree
-import errno
-import re
 
-from kaapana.operators.KaapanaPythonBaseOperator import KaapanaPythonBaseOperator
-from kaapana.blueprints.kaapana_global_variables import BATCH_NAME, WORKFLOW_DIR
+from kaapana.operators.KaapanaPythonBaseOperator import (
+    KaapanaPythonBaseOperator,
+)
 from kaapana.operators.HelperCaching import cache_operator_output
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 class LocalDcm2JsonOperator(KaapanaPythonBaseOperator):
     """
     Operator to convert DICOM files to JSON.
-    The operator uses the dcmtk tool dcm2json https://support.dcmtk.org/docs/dcm2json.html
     Additionally some keywords and values are transformed to increase the usability to find/search key-values.
 
-
     **Inputs:**
+
     * exit_on_error: exit with error, when some key/values are missing or mismatching.
     * delete_pixel_data: uses dcmtk's dcmodify to remove some specific to be known private tags
     * bulk: process all files of a series or only the first one (default)
@@ -40,873 +34,661 @@ class LocalDcm2JsonOperator(KaapanaPythonBaseOperator):
     * json file: output json file. DICOM tags are converted to a json file.
     """
 
-    @staticmethod
-    def get_label_tags(metadata):
-        result_dict = {}
-        segmentation_label_list = []
-        rtstruct_organ_list = []
-        rtstruct_marker_list = []
-        rtstruct_other_list = []
+    MODALITY_TAG = "00080060 Modality_keyword"
+    IMAGE_TYPE_TAG = "00080008 ImageType_keyword"
 
-        ref_list = None
-        if "30060080" in metadata:
-            try:
-                ref_list = [entry["300600A4"]["Value"][0] for entry in metadata["30060080"]["Value"]]
-            except Exception as e:
-                ref_list = None
+    def load_dicom_tag_dict(self):
+        dicom_tag_dict_path = os.getenv("DICT_PATH", None)
+        if dicom_tag_dict_path is None:
+            raise KeyError("DICT_PATH ENV NOT FOUND")
 
-        if "30060020" in metadata:
-            size_list = len(metadata["30060020"]["Value"])
-            for idx, label_entry in enumerate(metadata["30060020"]["Value"]):
-                if "30060026" in label_entry:
-                    value = label_entry["30060026"]["Value"][0].replace(",", "-")
-                    if ref_list is not None and len(ref_list) == size_list:
-                        label_type = ref_list[idx]
-                        if label_type.lower() == "marker":
-                            rtstruct_marker_list.append(value)
-                        elif label_type.lower() == "organ":
-                            rtstruct_organ_list.append(value)
-                        else:
-                            rtstruct_other_list.append(value)
-                    else:
-                        rtstruct_other_list.append(value)
+        else:
+            with open(dicom_tag_dict_path, encoding="utf-8") as dict_data:
+                self.dicom_tag_dict = json.load(dict_data)
 
-        if "00620002" in metadata:
-            for label_entry in metadata["00620002"]["Value"]:
-                if "00620005" in label_entry:
-                    value = label_entry["00620005"]["Value"][0].replace(",", "-")
-                    segmentation_label_list.append(value)
-        result_dict["segmentation_labels_list_keyword"] = ",".join(sorted(segmentation_label_list)) if len(segmentation_label_list) > 0 else None
-        result_dict["00620005 Segment Label_keyword"] = segmentation_label_list
-        result_dict["rtstruct_organ_list_keyword"] = ",".join(sorted(rtstruct_organ_list)) if len(rtstruct_organ_list) > 0 else None
-        result_dict["rtstruct_marker_list_keyword"] = ",".join(sorted(rtstruct_marker_list)) if len(rtstruct_marker_list) > 0 else None
-        result_dict["rtstruct_other_list_keyword"] = ",".join(sorted(rtstruct_other_list)) if len(rtstruct_other_list) > 0 else None
-        result_dict["rtstruct_organ_keyword"] = rtstruct_organ_list
-        result_dict["rtstruct_marker_keyword"] = rtstruct_marker_list
-        result_dict["rtstruct_other_keyword"] = rtstruct_other_list
+    def __init__(
+        self,
+        dag,
+        exit_on_error=False,
+        delete_pixel_data=True,
+        bulk=False,
+        **kwargs,
+    ):
+        """
+        :param exit_on_error: 'True' or 'False' (default). Exit with error, when some key/values are missing or mismatching.
+        :param delete_pixel_data: 'True' (default) or 'False'. removes pixel-data from DICOM.
+        :param bulk: 'True' or 'False' (default). Process all files of a series or only the first one.
+        """
 
-        return result_dict
+        self.kaapana_time_format = "%H:%M:%S.%f"
+        self.kaapana_date_format = "%Y-%m-%d"
+        self.kaapana_datetime_format = "%Y-%m-%d %H:%M:%S.%f"
+        self.dcm_datetime_format = "%Y%m%d%H%M%S.%f"
+        self.dcm_date_format = "%Y%m%d"
+        self.dcm_time_format = "%H%M%S.%f"
+
+        self.bulk = bulk
+        self.exit_on_error = exit_on_error
+        self.delete_pixel_data = delete_pixel_data
+
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        self.load_dicom_tag_dict()
+
+        if "testing" in kwargs:
+            logging.disable(logging.ERROR)
+
+        super().__init__(
+            dag=dag,
+            name="dcm2json",
+            python_callable=self.start,
+            ram_mem_mb=10,
+            **kwargs,
+        )
+
+    def _is_radiotherapy_modality(self, metadata: Dict) -> bool:
+        """Check if the modality is either RTSTRUCT or SEG."""
+        modality_tag = metadata.get("00080060")
+        return bool(modality_tag and modality_tag["Value"][0] in ("RTSTRUCT", "SEG"))
 
     @cache_operator_output
-    def start(self, ds, **kwargs):
-        print("Starting moule dcm2json...")
-        print(kwargs)
+    def start(self, **kwargs):
+        logger.info("Starting module dcm2json...")
 
-        run_dir = os.path.join(WORKFLOW_DIR, kwargs['dag_run'].run_id)
-        batch_folder = [f for f in glob.glob(os.path.join(run_dir, BATCH_NAME, '*'))]
-
-        with open(self.dict_path, encoding='utf-8') as dict_data:
-            self.dictionary = json.load(dict_data)
+        run_dir: Path = Path(self.airflow_workflow_dir, kwargs["dag_run"].run_id)
+        batch_folder: List[Path] = list((run_dir / self.batch_name).glob("*"))
 
         for batch_element_dir in batch_folder:
-            dcm_files = sorted(glob.glob(os.path.join(batch_element_dir, self.operator_in_dir, "*.dcm*"), recursive=True))
+            dcm_files: List[Path] = sorted(
+                list((batch_element_dir / self.operator_in_dir).rglob("*.dcm"))
+            )
 
             if len(dcm_files) == 0:
-                print("No dicom file found!")
-                raise ValueError('ERROR')
+                raise ValueError("No dicom file found!")
 
-            print('length', len(dcm_files))
+            logger.info(f"length {len(dcm_files)}")
             for dcm_file_path in dcm_files:
+                logger.info(f"Extracting metadata: {dcm_file_path}")
 
-                print(("Extracting metadata: %s" % dcm_file_path))
+                target_dir: Path = batch_element_dir / self.operator_out_dir
+                target_dir.mkdir(exist_ok=True)
+                json_file_path = target_dir / f"{batch_element_dir.name}.json"
 
-                target_dir = os.path.join(batch_element_dir, self.operator_out_dir)
-                if not os.path.exists(target_dir):
-                    os.makedirs(target_dir)
-
-                json_file_path = os.path.join(target_dir, "{}.json".format(os.path.basename(batch_element_dir)))
-
+                dcm = pydicom.read_file(dcm_file_path, stop_before_pixels=True)
                 if self.delete_pixel_data:
-                    # (0014,3080) Bad Pixel Image
-                    # (7FE0,0008) Float Pixel Data
-                    # (7FE0,0009) Double Float Pixel Data
-                    # (7FE0,0010) Pixel Data
-                    command = f"{self.dcmodify_path} --no-backup --ignore-missing-tags --erase-all \"(0014,3080)\" --erase-all \"(7FE0,0008)\" --erase-all \"(7FE0,0009)\" --erase-all \"(7FE0,0010)\" {dcm_file_path};"
-                    output = subprocess.run([command], shell=True)
-                
-                    if output.returncode != 0:
-                        print("Something went wrong with dcmodify...")
-                        print(f"Message: {output.stdout}")
-                        print(f"Error:   {output.stderr}")
-                        raise ValueError('ERROR')
-                        
-                self.executeDcm2Json(dcm_file_path, json_file_path)
-                json_dict = self.cleanJsonData(json_file_path)
+                    dcm = self._delete_pixel_data(dcm)
+                json_dict = dcm.to_json_dict()
+                del dcm
 
-                with open(json_file_path, "w", encoding='utf-8') as jsonData:
-                    json.dump(json_dict, jsonData, indent=4, sort_keys=True, ensure_ascii=True)
+                json_dict = self._clean_json(json_dict)
+                with open(json_file_path, "w", encoding="utf-8") as jsonData:
+                    json.dump(
+                        json_dict,
+                        jsonData,
+                        indent=4,
+                        sort_keys=True,
+                        ensure_ascii=True,
+                    )
 
-                # shutil.rmtree(self.temp_dir)
-
-                if self.bulk == False:
+                if not self.bulk:
                     break
 
-    def mkdir_p(self, path):
-        try:
-            os.makedirs(path)
-        except OSError as exc:  # Python >2.5
-            if exc.errno == errno.EEXIST and os.path.isdir(path):
-                pass
-            else:
-                raise
+    def _delete_pixel_data(self, dcm: pydicom.Dataset) -> pydicom.Dataset:
+        # (0014,3080) Bad Pixel Image
+        # (7FE0,0008) Float Pixel Data
+        # (7FE0,0009) Double Float Pixel Data
+        # (7FE0,0010) Pixel Data
+        pixel_data_elements = [
+            (0x0014, 0x3080),
+            (0x7FE0, 0x0008),
+            (0x7FE0, 0x0009),
+            (0x7FE0, 0x0010),
+        ]
 
-    def executeDcm2Json(self, inputDcm, outputJson):
-        """
-        Executes a conversion service
+        for elem in pixel_data_elements:
+            tag = pydicom.tag.Tag(*elem)
+            if tag in dcm:
+                del dcm[tag]
+        return dcm
 
-        program -- path to the service
-        arguments -- the arguments for the service
-        """
+    def _clean_json(self, metadata: Dict) -> Dict:
+        annotations_dict = {}
+        if self._is_radiotherapy_modality(metadata):
+            # Preprocess annotations into simplified tags
+            annotations_dict = self._process_annotation_tags(metadata)
 
-        command = self.dcm2json_path + " " + \
-            self.withAppostroph(inputDcm) + " " + \
-            self.withAppostroph(outputJson)
-        print(("Executing: " + command))
-        ret = subprocess.call(command, shell=True)
-        if ret != 0:
-            print("Something went wrong with dcm2json...")
-            raise ValueError('ERROR')
-        return
+        # Tag normalization
+        # 00080020 -> 00080020 DcmTagKeyword_type for all tags.
+        metadata = self._normalize_tags(metadata)
 
-    def withAppostroph(self, content):
-        return "\"" + content + "\""
+        # Adding RTSTRUCT and SEG labels if present.
+        metadata.update(annotations_dict)
 
-    def get_new_key(self, key):
-        new_key = ""
+        # Processing datetime, date and time tags
+        metadata = self._process_time_tags(metadata)
 
-        if key in self.dictionary:
-            new_key = self.dictionary[key]
+        # Processing - deducting and validating patient age from multiple tags
+        metadata = self._process_patient_age(metadata)
+
+        # Process aetitles used for kaapana datasets titles
+        metadata = self._process_clinical_trial_protocol_id(metadata)
+
+        # Change modality from CT to XR under specific conditions
+        metadata = self._process_modality(metadata)
+
+        # TODO Why is this necessary?
+        metadata["predicted_bodypart_string"] = "N/A"
+        return metadata
+
+    def _process_annotation_tags(self, metadata: Dict) -> Dict:
+        update_metadata = {}
+        annotation_label_list = []
+
+        # RTSTRUCT: ROI Structures
+        label_entries = metadata.get("30060020", {}).get("Value", [])
+        for label_entry in label_entries:
+            if "30060026" in label_entry:
+                value = label_entry["30060026"]["Value"][0].replace(",", "-")
+                annotation_label_list.append(value)
+
+        # SEG: Segments
+        segment_entries = metadata.get("00620002", {}).get("Value", [])
+        if segment_entries:
+            update_metadata["00620002 SegmentSequence_object_object"] = {}
+            for label_entry in segment_entries:
+                # setting alg_name, alg_type and value default to None if they do not exist.
+                alg_name = label_entry.get("00620009", {}).get("Value", [None])[0]
+                alg_type = label_entry.get("00620008", {}).get("Value", [None])[0]
+                value = (
+                    label_entry.get("00620005", {})
+                    .get("Value", [None])[0]
+                    .replace(",", "-")
+                    .strip()
+                )
+
+                if alg_name:
+                    update_metadata["00620002 SegmentSequence_object_object"][
+                        "00620009 SegmentAlgorithmName_keyword"
+                    ] = alg_name
+                if alg_type:
+                    update_metadata["00620002 SegmentSequence_object_object"][
+                        "00620008 SegmentAlgorithmType_keyword"
+                    ] = alg_type
+                if value:
+                    annotation_label_list.append(value)
+
+        update_metadata["00000000 AnnotationLabelsList_keyword"] = (
+            ",".join(sorted(annotation_label_list)) if annotation_label_list else None
+        )
+        update_metadata["00000000 AnnotationLabel_keyword"] = annotation_label_list
+        return update_metadata
+
+    def _normalize_tag(
+        self, new_tag: str, vr: str, value_str: str, metadata: Dict
+    ) -> Dict:
+        if vr in (
+            "AE",
+            "AS",
+            "AT",
+            "CS",
+            "LO",
+            "LT",
+            "OB",
+            "OW",
+            "SH",
+            "ST",
+            "UC",
+            "UI",
+            "UN",
+            "UT",
+        ):
+            new_tag += "_keyword"
+            metadata[new_tag] = value_str
+
+        elif vr == "DT":
+            datetime_formatted = self._format_datetime_value(new_tag, value_str)
+            if datetime_formatted is not None:
+                new_tag += "_datetime"
+                metadata[new_tag] = datetime_formatted
+
+        elif vr == "DA":
+            date_formatted = self._format_date_value(value_str)
+            if date_formatted is not None:
+                new_tag += "_date"
+                metadata[new_tag] = date_formatted
+
+        elif vr == "TM":
+            time_formatted = self._format_time_value(value_str)
+            if time_formatted is not None:
+                new_tag += "_time"
+                metadata[new_tag] = time_formatted
+
+        elif vr in ("DS", "FL", "FD", "OD", "OF"):
+            checked_val = check_type(value_str, float)
+            if checked_val is not None:
+                new_tag += "_float"
+                metadata[new_tag] = checked_val
+
+        elif vr in ("IS", "SL", "SS", "UL", "US"):
+            checked_val = check_type(value_str, int)
+            if checked_val is not None:
+                new_tag += "_integer"
+                metadata[new_tag] = checked_val
+
+        elif vr == "SQ":
+            checked_val = self._process_sequence_value(value_str)
+            if checked_val is not None:
+                new_tag += "_object"
+                metadata[new_tag] = checked_val
+
+        elif vr == "PN":
+            # Person Name
+            # A character string encoded using a 5 component convention. The character code 5CH (the BACKSLASH "\"
+            # in ISO-IR 6) shall not be present, as it is used as the delimiter between values in multiple valued data
+            # elements. The string may be padded with trailing spaces. For human use, the five components in their order
+            # of occurrence are: family name complex, given name complex, middle name, name prefix, name suffix.
+            new_tag += "_keyword"
+            subcategories = ["Alphabetic", "Ideographic", "Phonetic"]
+
+            for cat in subcategories:
+                if cat in value_str:
+                    new_cat_tag = f"{new_tag}_{cat.lower()}"
+                    metadata[new_cat_tag] = value_str[cat]
+
         else:
-            print("{}: Could not identify DICOM tag -> using plain tag instead...".format(key))
-            new_key = key
+            logger.warning(highlight_message("UNKNOWN VR"))
+            logger.warning(f"Tag: {new_tag}")
+            logger.warning(f"VR: {vr}")
+            logger.warning(f"Value: {value_str}")
 
-        return new_key
+            new_tag += "_keyword"
+            metadata[new_tag] = value_str
+        return metadata
 
-    def check_type(self, obj, val_type):
-        try:
-            if isinstance(obj, val_type) or (val_type is float and isinstance(obj, int)):
-                return obj
-            elif val_type is float and not isinstance(obj, list):
-                obj = float(obj)
-                return obj
-            elif val_type is int and not isinstance(obj, list):
-                obj = int(obj)
-                return obj
-            elif isinstance(obj, list):
-                for element in obj:
-                    if val_type is float:
-                        element = float(element)
-                    elif val_type is int:
-                        element = int(element)
-
-                    elif not isinstance(element, val_type):
-                        print("Error list entry value type!")
-                        print("Needed-Type: {}".format(val_type))
-                        print("List: {}".format(str(obj)))
-                        print("Value: {}".format(element))
-                        print("Type: {}".format(type(element)))
-                        return "SKIPIT"
-            else:
-                print("Wrong data type!!")
-                print("Needed-Type: {}".format(val_type))
-                print("Value: {}".format(obj))
-                return "SKIPIT"
-
-        except Exception as e:
-            print("Error check value type!")
-            print("Needed-Type: {}".format(val_type))
-            print("Found-Type:  {}".format(type(obj)))
-            print("Value: {}".format(obj))
-            print(e)
-            return "SKIPIT"
-
-        return obj
-
-    def get_time(self, time_str):
-        try:
-            hour = 0
-            minute = 0
-            sec = 0
-            fsec = 0
-            if "." in time_str:
-                time_str = time_str.split(".")
-                if time_str[1] != "":
-                    fsec = int(time_str[1])
-                time_str = time_str[0]
-            if len(time_str) == 6:
-                hour = int(time_str[:2])
-                minute = int(time_str[2:4])
-                sec = int(time_str[4:6])
-            elif len(time_str) == 4:
-                minute = int(time_str[:2])
-                sec = int(time_str[2:4])
-
-            elif len(time_str) == 2:
-                sec = int(time_str)
-
-            else:
-                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ could not convert time!")
-                print("time_str: {}".format(time_str))
-                if self.exit_on_error:
-                    raise ValueError('ERROR')
-
-            # HH:mm:ss.SSSSS
-            time_string = ("%02i:%02i:%02i.%06i" % (hour, minute, sec, fsec))
-            # date_output = ("\"%02i:%02i:%02i.%03i\""%(hour,minute,sec,fsec))
-            time_formatted = parser.parse(time_string).strftime(self.format_time)
-
-            # time_formatted=convert_time_to_utc(time_formatted,format_time)
-
-            return time_formatted
-
-        except Exception as e:
-            print("##################################### COULD NOT EXTRACT TIME!!")
-            print("Value: {}".format(time_str))
-            print(e)
-            if self.exit_on_error:
-                raise ValueError('ERROR')
-
-    def check_list(self, value_list):
-        tmp_data = []
-        for element in value_list:
-            if isinstance(element, dict):
-                tags_replaced = self.replace_tags(element)
-                tmp_data.append(tags_replaced)
-
-            elif isinstance(element, list):
-                tmp_data.append(self.check_list(element))
-
-            else:
-                tmp_data.append(element)
-
-        return tmp_data
-
-    def replace_tags(self, dicom_meta):
+    def _normalize_tags(self, metadata: Dict) -> Dict:
         new_meta_data = {}
-        for key, value in list(dicom_meta.items()):
-            new_key = ""
-            new_key = self.get_new_key(key)
-            if 'vr' in value and 'Value' in value:
-                value_str = dicom_meta[key]['Value']
-                vr = str(dicom_meta[key]['vr'])
+
+        for tag, tag_metadata in metadata.items():
+            new_tag = self.dicom_tag_dict.get(tag, None)
+
+            if new_tag is None:
+                logger.info(f"Tag {tag} not found in DICOM TAG database. Skipping ...")
+                continue
+
+            if "vr" in tag_metadata and "Value" in tag_metadata:
+                vr = str(tag_metadata["vr"])
+                value_str = tag_metadata["Value"]
+                value_str = strip_if_possible(value_str)
 
                 if "nan" in value_str:
-                    print("Found NAN! -> skipping")
+                    logger.info(f"Found NAN in value_str: {value_str}. Skipping ...")
                     continue
 
                 if isinstance(value_str, list):
                     if len(value_str) == 1:
                         value_str = value_str[0]
 
-                try:  # vr list: http://dicom.nema.org/dicom/2013/output/chtml/part05/sect_6.2.html
-
-                    if vr == "AE":
-                        # Application Entity
-                        # A string of characters that identifies an Application Entity with leading and trailing spaces (20H) being non-significant.
-                        # A value consisting solely of spaces shall not be used.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "AS":
-                        # Age String
-                        # A string of characters with one of the following formats -- nnnD, nnnW, nnnM, nnnY;
-                        # where nnn shall contain the number of days for D, weeks for W, months for M, or years for Y.
-
-                        # Example: "018M" would represent an age of 18 months.
-                        try:
-                            age_count = int(value_str[:3])
-                            identifier = value_str[3:]
-
-                            new_key = new_key+"_keyword"
-                            new_meta_data[new_key] = value_str
-                        except Exception as e:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            print("Could not extract age from: {}".format(value_str))
-                            print(e)
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "AT":
-                        # Attribute Tag
-                        # Ordered pair of 16-bit unsigned integers that is the value of a Data Element Tag.
-                        # Example: A Data Element Tag of (0018,00FF) would be encoded as a series of 4 bytes in a Little-Endian Transfer Syntax as 18H,00H,FFH,00H
-                        #  and in a Big-Endian Transfer Syntax as 00H,18H,00H,FFH.
-
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "CS":
-                        # Code String
-                        # A string of characters with leading or trailing spaces (20H) being non-significant.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "DA":
-                        # date
-                        # A string of characters of the format YYYYMMDD; where YYYY shall contain year,
-                        # MM shall contain the month, and DD shall contain the day, interpreted as a date of the Gregorian calendar system.
-                        # Example:
-                        # "19930822" would represent August 22, 1993.
-                        # Note:
-                        # The ACR-NEMA Standard 300 (predecessor to DICOM) supported a string of characters of the format
-                        # YYYY.MM.DD for this VR. Use of this format is not compliant.
-                        # See also DT VR in this table.
-                        try:
-                            if isinstance(value_str, list):
-                                date_formatted = []
-                                for date_str in value_str:
-                                    if date_str == "":
-                                        continue
-                                    date_formatted.append(parser.parse(date_str).strftime(self.format_date))
-                            else:
-                                date_formatted = parser.parse(value_str).strftime(self.format_date)
-
-                            new_key = new_key+"_date"
-                            new_meta_data[new_key] = date_formatted
-                        except Exception as e:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            print("Could not extract date from: {}".format(value_str))
-                            print(e)
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "DS":
-                        # Decimal String
-                        # A string of characters representing either a fixed point number or a floating point number.
-                        # A fixed point number shall contain only the characters 0-9 with an optional leading "+" or "-" and an optional "." to mark the decimal point.
-                        # A floating point number shall be conveyed as defined in ANSI X3.9, with an "E" or "e" to indicate the start of the exponent.
-                        # Decimal Strings may be padded with leading or trailing spaces. Embedded spaces are not allowed.
-
-                        #  Note
-                        #  Data Elements with multiple values using this VR may not be properly encoded if Explicit-VR transfer syntax is used
-                        #  and the VL of this attribute exceeds 65534 bytes.
-
-                        new_key = new_key+"_float"
-
-                        checked_val = self.check_type(value_str, float)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "DT":
-                        # Date Time
-                        # A concatenated date-time character string in the format:
-                        # YYYYMMDDHHMMSS.FFFFFF&ZZXX
-                        # 20020904000000.000000
-                        # "%Y-%m-%d %H:%M:%S.%f"
-                        try:
-                            date_time_string = None
-
-                            if len(value_str) == 21 and "." in value_str:
-                                date_time_string = parser.parse(value_str.split(".")[0]).strftime("%Y-%m-%d %H:%M:%S.%f")
-
-                            elif len(value_str) == 8:
-                                print("DATE ONLY FOUND")
-                                datestr_date = parser.parse(value_str).strftime("%Y%m%d")
-                                datestr_time = parser.parse("01:00:00").strftime("%H:%M:%S")
-                                date_time_string = datestr_date + " " + datestr_time
-
-                            elif len(value_str) == 16:
-                                print("DATETIME FOUND")
-                                datestr_date = str(value_str)[:8]
-                                datestr_time = str(value_str)[8:]
-                                datestr_date = parser.parse(datestr_date).strftime(self.format_date)
-                                datestr_time = parser.parse(datestr_time).strftime(self.format_time)
-                                date_time_string = datestr_date + " " + datestr_time
-
-                            else:
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                print("++++++++++++++++++++++++++++ No Datetime ++++++++++++++++++++++++++++")
-                                print("KEY  : {}".format(new_key))
-                                print("Value: {}".format(value_str))
-                                print("LEN: {}".format(len(value_str)))
-                                print("Skipping...")
-                                print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-                                if self.exit_on_error:
-                                    raise ValueError('ERROR')
-
-                            if date_time_string is not None:
-
-                                date_time_formatted = parser.parse(date_time_string).strftime(self.format_date_time)
-                                date_time_formatted = self.convert_time_to_utc(date_time_formatted, self.format_date_time)
-
-                                new_key = new_key+"_datetime"
-
-                                print("Value: {}".format(value_str))
-                                print("DATETIME: {}".format(date_time_formatted))
-                                new_meta_data[new_key] = date_time_formatted
-
-                        except Exception as e:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            print("Could not extract Date Time from: {}".format(value_str))
-                            print(e)
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "FL":
-                        # Floating Point Single
-                        # Single precision binary floating point number represented in IEEE 754:1985 32-bit Floating Point Number Format.
-
-                        new_key = new_key+"_float"
-
-                        checked_val = self.check_type(value_str, float)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "FD":
-                        # Floating Point Double
-                        # Double precision binary floating point number represented in IEEE 754:1985 64-bit Floating Point Number Format.
-
-                        new_key = new_key+"_float"
-
-                        checked_val = self.check_type(value_str, float)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "IS":
-                        # Integer String
-                        # A string of characters representing an Integer in base-10 (decimal), shall contain only the characters 0 - 9, with an optional leading "+" or "-". It may be padded with leading and/or trailing spaces. Embedded spaces are not allowed.
-                        # The integer, n, represented shall be in the range:
-                        # -231<= n <= (231-1).
-                        new_key = new_key+"_integer"
-
-                        checked_val = self.check_type(value_str, int)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "LO":
-                        # Long String
-                        # A character string that may be padded with leading and/or trailing spaces.
-                        # The character code 5CH (the BACKSLASH "\" in ISO-IR 6) shall not be present, as it is used as the delimiter
-                        # between values in multiple valued data elements. The string shall not have Control Characters except for ESC.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = str(value_str)
-
-                    elif vr == "LT":
-                        # Long Text
-                        # A character string that may contain one or more paragraphs.
-                        #  It may contain the Graphic Character set and the Control Characters, CR, LF, FF, and ESC.
-                        #  It may be padded with trailing spaces, which may be ignored, but leading spaces are considered to be significant.
-                        #  Data Elements with this VR shall not be multi-valued and therefore character code 5CH
-                        #  (the BACKSLASH "\" in ISO-IR 6) may be used.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "OB":
-                        # Other Byte String
-                        # A string of bytes where the encoding of the contents is specified by the negotiated Transfer Syntax.
-                        #  OB is a VR that is insensitive to Little/Big Endian byte ordering (see Section 7.3).
-                        #  The string of bytes shall be padded with a single trailing NULL byte value (00H) when necessary to achieve even length.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "OD":
-                        # Other Double String
-                        # A string of 64-bit IEEE 754:1985 floating point words.
-                        # OD is a VR that requires byte swapping within each 64-bit word when changing between Little Endian and Big Endian byte ordering
-
-                        new_key = new_key+"_float"
-
-                        checked_val = self.check_type(value_str, float)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "OF":
-                        # Other Float String
-                        # A string of 32-bit IEEE 754:1985 floating point words.
-                        # OF is a VR that requires byte sw14,3080) Bad Pixel Image
-                    # (7FE0,0008) Float Pixel Data
-                    # (7FE0,0009) Double Float Pixel Data
-                    # (7Fpping within each 32-bit word when changing between Little Endian and Big Endian byte ordering
-
-                        new_key = new_key+"_float"
-
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "OW":
-                        # Other Word String
-                        # A string of 16-bit words where the encoding of the contents is specified by the negotiated Transfer Syntax.
-                        #  OW is a VR that requires byte swapping within each word when changing between Little Endian and Big Endian byte ordering
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "PN":
-                        # Person Name
-                        # A character string encoded using a 5 component convention. The character code 5CH (the BACKSLASH "\"
-                        # in ISO-IR 6) shall not be present, as it is used as the delimiter between values in multiple valued data
-                        # elements. The string may be padded with trailing spaces. For human use, the five components in their order
-                        # of occurrence are: family name complex, given name complex, middle name, name prefix, name suffix.
-                        new_key = new_key+"_keyword"
-                        subcategories = ['Alphabetic',
-                                         'Ideographic', 'Phonetic']
-                        for cat in subcategories:
-                            if cat in value_str:
-                                new_meta_data[new_key+"_" +
-                                              cat.lower()] = value_str[cat]
-
-                    elif vr == "SH":
-                        # Short String
-                        # A character string that may be padded with leading and/or trailing spaces. The character code 05CH
-                        # (the BACKSLASH "\" in ISO-IR 6) shall not be present, as it is used as the delimiter between values
-                        # for multiple data elements. The string shall not have Control Characters except ESC.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = str(value_str)
-
-                    elif vr == "UC":
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = str(value_str)
-
-                    elif vr == "SL":
-                        # Signed Long
-                        # Signed binary integer 32 bits long in 2's complement form.
-                        # Represents an integer, n, in the range:
-                        # - 231<= n <= 231-1.
-                        new_key = new_key+"_integer"
-
-                        checked_val = self.check_type(value_str, int)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "SQ":
-                        result = []
-                        new_key = new_key+"_object"
-                        if isinstance(value_str, list):
-                            result = self.check_list(value_str)
-                            if isinstance(result, dict):
-                                new_meta_data[new_key] = result
-                            elif isinstance(result, list):
-                                for cat_id in range(len(result)):
-                                    cat = result[cat_id]
-                                    if isinstance(cat, dict):
-                                        pass
-                                        # todo blowing up index ...
-                                        # new_meta_data[new_key+"_"+str(cat_id)] = cat
-                                    else:
-                                        print("Attention!")
-                                        if self.exit_on_error:
-                                            raise ValueError('ERROR')
-
-                            else:
-                                print("ATTENTION!")
-                                if self.exit_on_error:
-                                    raise ValueError('ERROR')
-
-                        elif isinstance(value_str, dict):
-                            new_key = new_key+"_object"
-                            result = self.replace_tags(value_str)
-                            new_meta_data[new_key] = result
-
-                    elif vr == "SS":
-                        # Signed Short
-                        # Signed binary integer 16 bits long in 2's complement form. Represents an integer n in the range:
-                        # -215<= n <= 215-1.
-                        new_key = new_key+"_integer"
-
-                        checked_val = self.check_type(value_str, int)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "ST":
-                        # Short Text
-                        # A character string that may contain one or more paragraphs.
-                        # It may contain the Graphic Character set and the Control Characters, CR, LF, FF, and ESC.
-                        #  It may be padded with trailing spaces, which may be ignored, but leading spaces are considered to be significant.
-                        #  Data Elements with this VR shall not be multi-valued and therefore character code 5CH (the BACKSLASH "\" in ISO-IR 6) may be used.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "TM":
-                        # Time
-                        # A string of characters of the format HHMMSS.FFFFFF; where HH contains hours (range "00" - "23"), MM contains minutes (range "00" - "59"),
-                        # SS contains seconds (range "00" - "60"), and FFFFFF contains a fractional part of a second as small as 1 millionth of a second (range "000000" - "999999").
-                        # A 24-hour clock is used. Midnight shall be represented by only "0000" since "2400" would violate the hour range. The string may be padded with trailing spaces.
-                        # Leading and embedded spaces are not allowed. One or more of the components MM, SS, or FFFFFF may be unspecified as long as every component
-                        # to the right of an unspecified component is also unspecified, which indicates that the value is not precise to the precision of those unspecified components.
-                        # The FFFFFF component, if present, shall contain 1 to 6 digits. If FFFFFF is unspecified the preceding "." shall not be included.
-
-                        # Examples:
-                        # "070907.0705 " represents a time of 7 hours, 9 minutes and 7.0705 seconds.
-                        # "1010" represents a time of 10 hours, and 10 minutes.
-                        # "021 " is an invalid value.
-                        # Note
-                        # The ACR-NEMA Standard 300 (predecessor to DICOM) supported a string of characters of the format HH:MM:SS.frac for this VR. Use of this format is not compliant.
-                        # See also DT VR in this table.
-                        # The SS component may have a value of 60 only for a leap second.
-
-                        if isinstance(value_str, list):
-                            time_formatted = []
-                            for time_str in value_str:
-                                if time_str == "" or time_str is None:
-                                    continue
-                                time_formatted.append(self.get_time(time_str))
-                        else:
-                            time_formatted = self.get_time(value_str)
-
-                        new_key = new_key+"_time"
-                        new_meta_data[new_key] = time_formatted
-
-                    elif vr == "UI":
-                        # Unique Identifier (UID)
-                        # A character string containing a UID that is used to uniquely identify a wide variety of items.
-                        # The UID is a series of numeric components separated by the period "." character.
-                        # If a Value Field containing one or more UIDs is an odd number of bytes in length,
-                        # the Value Field shall be padded with a single trailing NULL (00H) character to ensure
-                        # that the Value Field is an even number of bytes in length. See Section 9 and Annex B for a complete specification and examples.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = str(value_str)
-
-                    elif vr == "UL":
-                        # Unsigned Long
-                        # Unsigned binary integer 32 bits long. Represents an integer n in the range:
-                        # 0 <= n < 232.
-
-                        new_key = new_key+"_integer"
-
-                        checked_val = self.check_type(value_str, int)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "UN":
-                        # Unknown
-                        # A string of bytes where the encoding of the contents is unknown.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = value_str
-
-                    elif vr == "US":
-                        # Unsigned Short
-                        # Unsigned binary integer 16 bits long. Represents integer n in the range:
-                        # 0 <= n < 216.
-                        new_key = new_key+"_integer"
-
-                        checked_val = self.check_type(value_str, int)
-                        if checked_val != "SKIPIT":
-                            new_meta_data[new_key] = checked_val
-                        else:
-                            print("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ SKIPPED")
-                            if self.exit_on_error:
-                                raise ValueError('ERROR')
-
-                    elif vr == "UT":
-                        # Unlimited Text
-                        # A character string that may contain one or more paragraphs. It may contain the Graphic Character set and the Control Characters, CR, LF,
-                        # FF, and ESC. It may be padded with trailing spaces, which may be ignored, but leading spaces are considered to be significant.
-                        # Data Elements with this VR shall not be multi-valued and therefore character code 5CH (the BACKSLASH "\" in ISO-IR 6) may be used.
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = (value_str)
-
-                    else:
-                        print(f"################ VR in ELSE!: {vr}")
-                        print(f"DICOM META: {dicom_meta[key]}")
-                        new_key = new_key+"_keyword"
-                        new_meta_data[new_key] = (value_str)
-
+                try:
+                    new_meta_data = self._normalize_tag(
+                        new_tag, vr, value_str, new_meta_data
+                    )
                 except Exception as e:
-                    logging.error("#")
-                    logging.error("#")
-                    logging.error("#")
-                    logging.error("################################### EXCEPTION #######################################")
-                    logging.error("#")
-                    logging.error(f"DICOM META: {dicom_meta[key]}")
-                    logging.error(traceback.format_exc())
-                    logging.error(value_str)
-                    logging.error(e)
-                    logging.error("#")
-                    logging.error("#")
-                    logging.error("#")
-                    raise ValueError('ERROR')
+                    logger.error(highlight_message("KNOWN VR EXCEPTION"))
+                    logger.error(f"Tag: {new_tag}")
+                    logger.error(f"Tag metadata: {tag_metadata}")
+                    logger.error(traceback.format_exc())
+                    logger.error(e)
+                    raise ValueError(tag_metadata)
 
             else:
-                if "InlineBinary" in value:
-                    print("##########################################################################        SKIPPING BINARY!")
-                elif "Value" not in value:
-                    print("No value found in entry: {}".format(str(value).strip('[]').encode('utf-8')))
-                elif "vr" not in value:
-                    print("No vr found in entry: {}".format(str(value).strip('[]').encode('utf-8')))
-                else:
-                    print("##########################################################################        replace_tags ELSE!")
-                    if "vr" in value:
-                        print("VR: {}".format(value["vr"].encode('utf-8')))
-                    if "Value" in value:
-                        entry_value = str(value["Value"]).strip('[]').encode('utf-8')
-                        print("value: {}".format(entry_value))
-
-                    print("new_key: {}".format(new_key))
+                logger.info(f"New tag: {new_tag}")
+                handle_incomplete_tag_metadata(tag_metadata)
 
         return new_meta_data
 
-    def correct_json(self, file_path):
-        print("ERROR IN JSON FILE -> Try to correct")
-        try:
-            with open(file_path, "r", encoding='utf-8') as f:
-                yaml_data = yaml.safe_load(f)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(yaml_data, f, indent=4, sort_keys=True, ensure_ascii=False)
-        except Exception as e:
-            print("##########################################################################        correction of json file  failed!")
-            print(e)
-            raise ValueError('ERROR')
-
-    def cleanJsonData(self, path):
+    def _process_modality(self, metadata: Dict) -> Dict:
         """
-        Removes unneccessary data from json objects like binary stuff
+        If dicom modality tag is "CT" and ImageType tag contains "Localizer", "CT" (3D) is changed to "XR" (2D)
+        :param dcm_file: path to first slice of dicom image
+        :param modality: dicom modality tag
+        :return: _description_
         """
-        new_meta_data = {}
+        assert self.MODALITY_TAG in metadata
+        modality = metadata[self.MODALITY_TAG]
 
-        path_tmp = path.replace(".json", "_tmp.json")
-        os.rename(path, path_tmp)
-        with open(path_tmp, "rt", encoding="utf-8") as fin:
-            with open(path, "wt", encoding="utf-8") as fout:
-                for line in fin:
-                    line = line.replace(" .", " 0.")
-                    m = re.search(r"[\+][\d]", line)
-                    if m is not None:
-                        group = m.group()
-                        fout.write(line.replace('+', ''))
-                    else:
-                        fout.write(line)
-        os.remove(path_tmp)
-        try:
-            with open(path, encoding='utf-8') as dicom_meta:
-                dicom_metadata = json.load(dicom_meta)
+        metadata.update({"00000000 CuratedModality_keyword": modality})
+        if self.IMAGE_TYPE_TAG in metadata:
+            image_type = metadata[self.IMAGE_TYPE_TAG]
+            if isinstance(image_type, list):
+                if (
+                    modality == "CT"
+                    and "LOCALIZER" in image_type
+                    and len(image_type) >= 3
+                ):
+                    metadata.update({"00000000 CuratedModality_keyword": "XR"})
 
-        except Exception as e:
-            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ ERROR WHILE LOADING JSON!!")
-            print(e)
-            print("Try to correct...")
-            self.correct_json(path)
-            print("Try again...")
-            with open(path, encoding='utf-8') as dicom_meta:
-                dicom_metadata = json.load(dicom_meta)
+        return metadata
 
-        label_results = {}
-        if "00080060" in dicom_metadata and (dicom_metadata["00080060"]["Value"][0] == "RTSTRUCT" or dicom_metadata["00080060"]["Value"][0] == "SEG"):
-            label_results = LocalDcm2JsonOperator.get_label_tags(dicom_metadata)
-        new_meta_data = self.replace_tags(dicom_metadata)
-        new_meta_data.update(label_results)
+    def _process_time_tags(self, metadata: Dict) -> Dict:
+        time_tag_used = ""
+        extracted_date = None
+        extracted_time = None
 
-        if "0008002A AcquisitionDateTime_datetime" in new_meta_data:
+        # Check for AcquisitionDateTime
+        if "0008002A AcquisitionDateTime_datetime" in metadata:
             time_tag_used = "AcquisitionDateTime_datetime"
-            date_time_formatted = new_meta_data["0008002A AcquisitionDateTime_datetime"]
+            datetime_formatted = metadata["0008002A AcquisitionDateTime_datetime"]
+
         else:
-            time_tag_used = ""
-            extracted_date = None
-            extracted_time = None
-            if "00080022 AcquisitionDate_date" in new_meta_data:
-                time_tag_used = "AcquisitionDate"
-                extracted_date = new_meta_data["00080022 AcquisitionDate_date"]
-            elif "00080021 SeriesDate_date" in new_meta_data:
-                time_tag_used = "SeriesDate"
-                extracted_date = new_meta_data["00080021 SeriesDate_date"]
-            elif "00080023 ContentDate_date" in new_meta_data:
-                time_tag_used = "ContentDate"
-                extracted_date = new_meta_data["00080023 ContentDate_date"]
-            elif "00080020 StudyDate_date" in new_meta_data:
-                time_tag_used = "StudyDate"
-                extracted_date = new_meta_data["00080020 StudyDate_date"]
+            # Define a mapping of date and time tags
+            date_tags = (
+                "00080022 AcquisitionDate_date",
+                "00080021 SeriesDate_date",
+                "00080023 ContentDate_date",
+                "00080020 StudyDate_date",
+            )
+            time_tags = (
+                "00080032 AcquisitionTime_time",
+                "00080031 SeriesTime_time",
+                "00080033 ContentTime_time",
+                "00080030 StudyTime_time",
+            )
 
-            if "00080032 AcquisitionTime_time" in new_meta_data:
-                time_tag_used += " + AcquisitionTime"
-                extracted_time = new_meta_data["00080032 AcquisitionTime_time"]
-            elif "00080031 SeriesTime_time" in new_meta_data:
-                time_tag_used += " + SeriesTime"
-                extracted_time = new_meta_data["00080031 SeriesTime_time"]
-            elif "00080033 ContentTime_time" in new_meta_data:
-                time_tag_used += " + ContentTime"
-                extracted_time = new_meta_data["00080033 ContentTime_time"]
-            elif "00080030 StudyTime_time" in new_meta_data:
-                time_tag_used += " + StudyTime"
-                extracted_time = new_meta_data["00080030 StudyTime_time"]
+            for tag in date_tags:
+                if tag in metadata:
+                    time_tag_used = get_tag_stem(tag)
+                    extracted_date = metadata[tag]
+                    break
 
-            if extracted_date == None:
-                print("###########################        NO AcquisitionDate! -> set to today")
+            for tag in time_tags:
+                if tag in metadata:
+                    time_tag_used += " + " + get_tag_stem(tag)
+                    extracted_time = metadata[tag]
+                    break
+
+            if extracted_date is None:
+                logger.warning("NO AcquisitionDate! -> set to today")
                 time_tag_used += "date not found -> arriving date"
-                extracted_date = datetime.now().strftime(self.format_date)
+                extracted_date = datetime.now().strftime(self.kaapana_date_format)
 
-            if extracted_time == None:
-                print("###########################        NO AcquisitionTime! -> set to now")
+            if extracted_time is None:
+                logger.warning("NO AcquisitionTime! -> set to now")
                 time_tag_used += " + time not found -> arriving time"
-                extracted_time = datetime.now().strftime(self.format_time)
+                extracted_time = datetime.now().strftime(self.kaapana_time_format)
 
-            date_time_string = extracted_date+" "+extracted_time
-            date_time_formatted = parser.parse(date_time_string).strftime(self.format_date_time)
+            datetime_string = f"{extracted_date} {extracted_time}"
+            datetime_formatted = parser.parse(datetime_string).strftime(
+                self.kaapana_datetime_format
+            )
 
-        date_time_formatted = self.convert_time_to_utc(date_time_formatted, self.format_date_time)
-        new_meta_data["timestamp"] = date_time_formatted
+        # TODO NAIVE! Expects BerlinTime datetime and convert to UTC
+        datetime_formatted = self.convert_time_to_utc(
+            datetime_formatted, self.kaapana_datetime_format
+        )
 
-        timestamp_arrived = datetime.now()
-        new_meta_data["timestamp_arrived_datetime"] = self.convert_time_to_utc(timestamp_arrived.strftime(self.format_date_time), self.format_date_time)
+        # Update the metadata with the formatted datetime
+        metadata["00000000 Timestamp_datetime"] = datetime_formatted
 
-        new_meta_data["timestamp_arrived_date"] = new_meta_data["timestamp_arrived_datetime"][:10]
-        new_meta_data["timestamp_arrived_hour_integer"] = new_meta_data["timestamp_arrived_datetime"][11:13]
+        # Update the metadata with arrival time
+        current_utc_datetime = datetime.utcnow()
+        formatted_utc_datetime = current_utc_datetime.strftime(
+            self.kaapana_datetime_format
+        )
+        formatted_utc_date = current_utc_datetime.strftime(self.kaapana_date_format)
 
-        new_meta_data["dayofweek_integer"] = datetime.strptime(
-            date_time_formatted, self.format_date_time).weekday()
-        new_meta_data["time_tag_used_keyword"] = time_tag_used
-        new_meta_data["predicted_bodypart_string"] = "N/A"
+        # Formatted strings
+        metadata["00000000 TimestampArrived_datetime"] = formatted_utc_datetime
+        metadata["00000000 TimestampArrived_date"] = formatted_utc_date
 
-        if "00100030 PatientBirthDate_date" in new_meta_data:
-            birthdate = new_meta_data["00100030 PatientBirthDate_date"]
+        # Integers
+        metadata["00000000 TimestampArrivedHour_integer"] = current_utc_datetime.hour
+        metadata["00000000 DayOfWeek_integer"] = datetime.strptime(
+            datetime_formatted, self.kaapana_datetime_format
+        ).weekday()
 
-            birthday_datetime = datetime.strptime(birthdate, "%Y-%m-%d")
+        # Keywords
+        metadata["00000000 TimeTagUsed_keyword"] = time_tag_used
+        return metadata
 
+    def _process_patient_age(self, metadata: Dict) -> Dict:
+        if "00100030 PatientBirthDate_date" in metadata:
+            birthdate = metadata["00100030 PatientBirthDate_date"]
+            birthday_datetime = datetime.strptime(birthdate, self.kaapana_date_format)
             series_datetime = datetime.strptime(
-                date_time_formatted, self.format_date_time)
-            patient_age_scan = series_datetime.year - birthday_datetime.year - \
-                ((series_datetime.month, series_datetime.day) <
-                 (birthday_datetime.month, birthday_datetime.day))
+                metadata["00000000 Timestamp_datetime"],
+                self.kaapana_datetime_format,
+            )
+            patient_age_scan = (
+                series_datetime.year
+                - birthday_datetime.year
+                - (
+                    (series_datetime.month, series_datetime.day)
+                    < (birthday_datetime.month, birthday_datetime.day)
+                )
+            )
 
-            if "00101010 PatientAge_keyword" in new_meta_data:
-                age_meta = int(new_meta_data["00101010 PatientAge_keyword"][:-1])
-                if patient_age_scan is not age_meta:
-                    print("########################################################################################### DIFF IN AGE!")
-            new_meta_data["00101010 PatientAge_integer"] = patient_age_scan
+            if "00101010 PatientAge_keyword" in metadata:
+                age_meta = process_age_string(metadata["00101010 PatientAge_keyword"])
 
-        elif "00101010 PatientAge_keyword" in new_meta_data:
+                if patient_age_scan != age_meta:
+                    logger.error(highlight_message("Patient AGE inconsistency"))
+                    logger.error(
+                        f"Series datetime - birthday datetime: {patient_age_scan}"
+                    )
+                    logger.error(f"PatientBirthDate: {age_meta}")
+
+            metadata["00101010 PatientAge_integer"] = patient_age_scan
+        elif "00101010 PatientAge_keyword" in metadata:
             try:
-                age_meta = int(new_meta_data["00101010 PatientAge_keyword"][:-1])
-                new_meta_data["00101010 PatientAge_integer"] = age_meta
+                age_meta = process_age_string(metadata["00101010 PatientAge_keyword"])
+                metadata["00101010 PatientAge_integer"] = age_meta
             except Exception as e:
-                print("######### Could not extract age-int from metadata...")
+                logger.error("Could not extract age-int from metadata.")
+                logger.error(traceback.format_exc())
+                logger.error(e)
+        return metadata
 
-        if "00120020 ClinicalTrialProtocolID_keyword" in new_meta_data:
-            aetitles = new_meta_data["00120020 ClinicalTrialProtocolID_keyword"].split(";")
-            print(f"ClinicalTrialProtocolIDs {aetitles}")
-            new_meta_data["00120020 ClinicalTrialProtocolID_keyword"] = aetitles
+    def _process_clinical_trial_protocol_id(self, metadata: Dict) -> Dict:
+        if "00120020 ClinicalTrialProtocolID_keyword" in metadata:
+            protocol_ids = metadata["00120020 ClinicalTrialProtocolID_keyword"].split(
+                ";"
+            )
+            logger.info(f"ClinicalTrialProtocolIDs: {protocol_ids}")
+            metadata["00120020 ClinicalTrialProtocolID_keyword"] = protocol_ids
+        return metadata
 
-        return new_meta_data
+    def _format_datetime_value(self, new_tag, value_str):
+        # Date Time
+        # A concatenated date-time character string in the format:
+        # YYYYMMDDHHMMSS.FFFFFF&ZZXX
+        # 20020904000000.000000
+        # "%Y-%m-%d %H:%M:%S.%f"
+        try:
+            datetime_formatted = None
+            if validate_format(value_str, self.dcm_datetime_format):
+                datetime_formatted = datetime.strptime(
+                    value_str, self.dcm_datetime_format
+                ).strftime(self.kaapana_datetime_format)
+            else:
+                logger.info(f"Value: {value_str} not complete dcm date time.")
+                logger.info(f"Dicom Standard Format: {self.dcm_datetime_format}")
 
-    def convert_time_to_utc(self, time_berlin, date_format):
+            if datetime_formatted is None:
+                if len(value_str) > 8:
+                    logger.info(f"Trying to parse long datetime format.")
+                    datetime_formatted = parser.parse(value_str).strftime(
+                        self.kaapana_datetime_format
+                    )
+                else:
+                    logger.info(f"Trying to parse short date format with default time.")
+                    date = parser.parse(value_str).date()
+                    time = parser.parse("01:00:00").time()
+                    datetime_formatted = datetime.combine(date, time).strftime(
+                        self.kaapana_datetime_format
+                    )
+
+            datetime_formatted = self.convert_time_to_utc(
+                datetime_formatted, self.kaapana_datetime_format
+            )
+            return datetime_formatted
+        except Exception as e:
+            logger.error(highlight_message(f"COULD NOT EXTRACT DATETIME"))
+            logger.error(f"Tag  : {new_tag}")
+            logger.error(f"Value: {value_str}")
+            logger.error(f"Size : {len(value_str)}")
+            logger.error(traceback.format_exc())
+            logger.error(e)
+
+            if self.exit_on_error:
+                raise ValueError("COULD NOT EXTRACT DATETIME")
+
+    def _format_date_value(self, value_str):
+        # date
+        # A string of characters of the format YYYYMMDD; where YYYY shall contain year,
+        # MM shall contain the month, and DD shall contain the day, interpreted as a date of the Gregorian calendar system.
+        # Example:
+        # "19930822" would represent August 22, 1993.
+        # Note:
+        # The ACR-NEMA Standard 300 (predecessor to DICOM) supported a string of characters of the format
+        # YYYY.MM.DD for this VR. Use of this format is not compliant.
+        # See also DT VR in this table.
+        try:
+            if isinstance(value_str, list):
+                date_formatted = [
+                    parser.parse(date_str).strftime(self.kaapana_date_format)
+                    for date_str in value_str
+                    if date_str != ""
+                ]
+            elif isinstance(value_str, str):
+                date_formatted = parser.parse(value_str).strftime(
+                    self.kaapana_date_format
+                )
+            else:
+                raise TypeError(
+                    f"Not supported type {type(value_str)} of value {value_str}"
+                )
+            return date_formatted
+
+        except Exception as e:
+            logger.error(highlight_message(f"COULD NOT EXTRACT DATE"))
+            logger.error(f"Value: {value_str}")
+            logger.error(f"Size : {len(value_str)}")
+            logger.error(traceback.format_exc())
+            logger.error(e)
+
+            if self.exit_on_error:
+                raise ValueError("COULD NOT EXTRACT DATE")
+
+    def _format_time_value(self, value_str):
+        # Time
+        # A string of characters of the format HHMMSS.FFFFFF; where HH contains hours (range "00" - "23"), MM contains minutes (range "00" - "59"),
+        # SS contains seconds (range "00" - "60"), and FFFFFF contains a fractional part of a second as small as 1 millionth of a second (range "000000" - "999999").
+        # A 24-hour clock is used. Midnight shall be represented by only "0000" since "2400" would violate the hour range. The string may be padded with trailing spaces.
+        # Leading and embedded spaces are not allowed. One or more of the components MM, SS, or FFFFFF may be unspecified as long as every component
+        # to the right of an unspecified component is also unspecified, which indicates that the value is not precise to the precision of those unspecified components.
+        # The FFFFFF component, if present, shall contain 1 to 6 digits. If FFFFFF is unspecified the preceding "." shall not be included.
+
+        # Examples:
+        # "070907.0705 " represents a time of 7 hours, 9 minutes and 7.0705 seconds.
+        # "1010" represents a time of 10 hours, and 10 minutes.
+        # "021 " is an invalid value.
+        # Note
+        # The ACR-NEMA Standard 300 (predecessor to DICOM) supported a string of characters of the format HH:MM:SS.frac for this VR. Use of this format is not compliant.
+        # See also DT VR in this table.
+        # The SS component may have a value of 60 only for a leap second.
+        if isinstance(value_str, list):
+            time_formatted = []
+
+            for time_str in value_str:
+                if time_str == "" or time_str is None:
+                    continue
+                time_formatted.append(self._get_time(time_str))
+        else:
+            time_formatted = self._get_time(value_str)
+
+        return time_formatted
+
+    def _get_time(self, time_str):
+        if validate_format(time_str, self.dcm_time_format):
+            return datetime.strptime(time_str, self.dcm_time_format).strftime(
+                self.kaapana_time_format
+            )
+
+        hour = 0
+        minute = 0
+        sec = 0
+        fsec = 0
+        if "." in time_str:
+            time_str = time_str.split(".")
+            if time_str[1] != "":
+                fsec = int(time_str[1])
+            time_str = time_str[0]
+
+        if len(time_str) == 6:
+            hour = int(time_str[:2])
+            minute = int(time_str[2:4])
+            sec = int(time_str[4:6])
+        elif len(time_str) == 4:
+            hour = int(time_str[:2])
+            minute = int(time_str[2:4])
+        elif len(time_str) == 2:
+            hour = int(time_str)
+
+        else:
+            logger.error(highlight_message("COULD NOT EXTRACT TIME"))
+            logger.error(f"Value: {time_str}")
+
+            if self.exit_on_error:
+                raise ValueError("COULD NOT EXTRACT TIME")
+
+        # HH:mm:ss.SSSSS
+        time_string = f"{hour:02}:{minute:02}:{sec:02}.{fsec:06}"
+        time_formatted = parser.parse(time_string).strftime(self.kaapana_time_format)
+
+        return time_formatted
+
+    def _process_sequence_value(self, value_str):
+        if isinstance(value_str, dict):
+            return self._normalize_tags(value_str)
+
+        elif isinstance(value_str, list):
+            processed_values = self._check_list(value_str)
+            if isinstance(processed_values, dict):
+                return processed_values
+
+            elif isinstance(processed_values, list):
+                for value in processed_values:
+                    if isinstance(value, dict):
+                        logger.info("Sequence value is nested too much. Skipping...")
+                        logger.info("Nesting: dict -> list -> dict -> ... ")
+
+                    else:
+                        logger.error("Unexpected nested sequence")
+                        if self.exit_on_error:
+                            raise ValueError("Unexpected nested sequence")
+            else:
+                logger.error("Unexpected nested sequence")
+                if self.exit_on_error:
+                    raise ValueError("Unexpected nested sequence")
+        else:
+            return None
+
+    def _check_list(self, value_list):
+        tmp_data = []
+        for element in value_list:
+            if isinstance(element, dict):
+                tags_replaced = self._normalize_tags(element)
+                tmp_data.append(tags_replaced)
+
+            elif isinstance(element, list):
+                tmp_data.append(self._check_list(element))
+
+            else:
+                tmp_data.append(element)
+
+        return tmp_data
+
+    @staticmethod
+    def convert_time_to_utc(time_berlin: str, date_format: str):
         local = pytz.timezone("Europe/Berlin")
         naive = datetime.strptime(time_berlin, date_format)
         local_dt = local.localize(naive, is_dst=None)
@@ -914,43 +696,103 @@ class LocalDcm2JsonOperator(KaapanaPythonBaseOperator):
 
         return utc_dt.strftime(date_format)
 
-    def __init__(self,
-                 dag,
-                 exit_on_error=False,
-                 delete_pixel_data=True,
-                 bulk=False,
-                 **kwargs):
-        """
-        :param exit_on_error: 'True' or 'False' (default). Exit with error, when some key/values are missing or mismatching.
-        :param delete_pixel_data:'True' (default) or 'False'. removes pixel-data from DICOM
-        :param bulk: 'True' or 'False' (default). Process all files of a series or only the first one.
-        """
 
-        self.dcmodify_path = 'dcmodify'
-        self.dcm2json_path = 'dcm2json'
-        self.format_time = "%H:%M:%S.%f"
-        self.format_date = "%Y-%m-%d"
-        self.format_date_time = "%Y-%m-%d %H:%M:%S.%f"
-        self.bulk = bulk
-        self.exit_on_error = exit_on_error
-        self.delete_pixel_data = delete_pixel_data
-
-        os.environ["PYTHONIOENCODING"] = "utf-8"
-        if 'DCMDICTPATH' in os.environ and 'DICT_PATH' in os.environ:
-            self.dcmdictpath = os.getenv('DCMDICTPATH')
-            self.dict_path = os.getenv('DICT_PATH')
-        else:
-            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-            print("DCMDICTPATH or DICT_PATH ENV NOT FOUND!")
-            print("dcmdictpath: {}".format(os.getenv('DCMDICTPATH')))
-            print("dict_path: {}".format(os.getenv('DICT_PATH')))
-            print("++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-            raise ValueError('ERROR')
-
-        super().__init__(
-            dag=dag,
-            name="dcm2json",
-            python_callable=self.start,
-            ram_mem_mb=10,
-            **kwargs
+def handle_incomplete_tag_metadata(tag_metadata: Dict):
+    if "InlineBinary" in tag_metadata:
+        logger.info(highlight_message("SKIPPING BINARY"))
+    elif "Value" not in tag_metadata:
+        logger.info(
+            f"No value found in entry: {str(tag_metadata).strip('[]').encode('utf-8')}"
         )
+    elif "vr" not in tag_metadata:
+        logger.info(
+            f"No vr found in entry: {str(tag_metadata).strip('[]').encode('utf-8')}"
+        )
+    else:
+        logger.error(highlight_message("IMPOSSIBLE REACH"))
+        logger.error("Value or vr missing but present at the same time.")
+        if "vr" in tag_metadata:
+            logger.error(f"VR: {tag_metadata['vr'].encode('utf-8')}")
+        if "Value" in tag_metadata:
+            entry_value = str(tag_metadata["Value"]).strip("[]").encode("utf-8")
+            logger.error(f"value: {entry_value}")
+
+
+def get_tag_stem(tag: str) -> str:
+    # Example 000800016 SomethingVeryImportant_datetime -> SomethingVeryImportant
+    return tag.split(" ")[-1].split("_")[0]
+
+
+def highlight_message(message: str) -> str:
+    highlight = "#" * 10
+    highlighted_message = f"{highlight} {message} {highlight}"
+    return highlighted_message
+
+
+def check_type(obj, val_type):
+    try:
+        if isinstance(obj, val_type) or (val_type is float and isinstance(obj, int)):
+            return obj
+        elif val_type is float and not isinstance(obj, list):
+            obj = float(obj)
+            return obj
+        elif val_type is int and not isinstance(obj, list):
+            obj = int(obj)
+            return obj
+
+        elif isinstance(obj, list):
+            for element in obj:
+                if val_type is float:
+                    element = float(element)
+                elif val_type is int:
+                    element = int(element)
+
+                elif not isinstance(element, val_type):
+                    logger.error("Error list entry value type!")
+                    logger.error(f"Needed-Type: {val_type}")
+                    logger.error(f"List: {str(obj)}")
+                    logger.error(f"Value: {element}")
+                    logger.error(f"Type: {type(element)}")
+
+        else:
+            logger.error("Wrong data type!!")
+            logger.error(f"Needed-Type: {val_type}")
+            logger.error(f"Value: {obj}")
+
+    except Exception as e:
+        logger.error("Error check value type!")
+        logger.error(f"Needed-Type: {val_type}")
+        logger.error(f"Found-Type:  {type(obj)}")
+        logger.error(f"Value: {obj}")
+        logger.error(traceback.format_exc())
+        logger.error(e)
+    return obj
+
+
+def validate_format(value_str, format_str):
+    try:
+        datetime.strptime(value_str, format_str)
+        return True
+    except ValueError:
+        return False
+
+
+def strip_if_possible(value_str):
+    if isinstance(value_str, str):
+        return value_str.strip()
+    elif isinstance(value_str, list):
+        return [strip_if_possible(value) for value in value_str]
+    else:
+        return value_str
+
+
+def process_age_string(age_string):
+    unit = age_string[-1]  # Unit can be 'D', 'M', or 'Y'
+    quantity = age_meta = int(age_string[:-1])
+    if unit == "D":
+        age_meta = quantity // 365
+    elif unit == "M":
+        age_meta = quantity // 12
+    else:
+        age_meta = quantity
+    return age_meta
