@@ -53,16 +53,27 @@ spec:
         ports: # Port(s) on which your application runs
           - containerPort: 5000
         volumeMounts:
+{{- if .Values.global.dev_files }}
+          - name: kaapana-dev-files
+            mountPath: /kaapana/app
+{{- end }}
           - name: helmextensions
             mountPath: "/kaapana/mounted/extensions"
           - name: helmplatforms
             mountPath: "/kaapana/mounted/platforms"
           - name: containerd-socket
             mountPath: "/kaapana/mounted/containerd.sock"
+          - name: tmp
+            mountPath: "/tmp"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
       volumes:
       - name: containerd-socket
         hostPath:
           path: /var/snap/microk8s/common/run/containerd.sock
+      - name: tmp
+        emptyDir: {}
       - name: helmextensions
         persistentVolumeClaim:
           claimName: extensions-pv-claim
@@ -70,7 +81,13 @@ spec:
         hostPath:
           path: "{{ $.Values.global.fast_data_dir }}/platforms"
           type: DirectoryOrCreate
+{{- if .Values.global.dev_files }}
+      - name: kaapana-dev-files
+        persistentVolumeClaim:
+          claimName: kh-dev-pv-claim
+{{- end }}
       serviceAccountName: kaapana-kube-admin
+      priorityClassName: kaapana-high-priority
       imagePullSecrets:
       - name: registry-secret
 ---

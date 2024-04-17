@@ -29,42 +29,34 @@ base_image_ref_dict = {}
 skipped_dict = {"segmentation_files": [], "base_images": []}
 
 
+# RTSTRUCT mask_5--1--Lung-Right-meta.json
+# RTSTRUCT mask_5--1--Lung-Right.nii.gz
 def get_seg_info(input_nifti):
     print(f"# Get seg configuration for: {basename(input_nifti)}")
-    model_id = (
-        f"{basename(input_nifti).replace('.nii.gz','').split('--')[-1]}"
-        if "--" in basename(input_nifti)
-        else ""
-    )
-    existing_configuration = None
+    model_id = basename(input_nifti).replace(".nii.gz", "").split("--")[-1]
     seg_nifti_id = basename(input_nifti).replace(".nii.gz", "")
+    print(f"# {model_id=}")
+    print(f"# {seg_nifti_id=}")
     json_files_found = glob(join(dirname(input_nifti), "*.json"), recursive=False)
-    print(f"{model_id=}")
-    json_files_found = [
-        meta_json_path
-        for meta_json_path in json_files_found
-        if "model_combinations" not in meta_json_path
-    ]
-    if len(json_files_found) > 0 and "-meta.json" in json_files_found[0]:
-        assert "--" in input_nifti
-        json_file_found = [
-            list_json
-            for list_json in json_files_found
-            if seg_nifti_id.split("--")[0] in list_json
-        ]
-        if len(json_files_found) > 1:
-            print(f"Still more than one file found: {json_files_found=}")
-            json_file_found = [
-                list_json
-                for list_json in json_files_found
-                if f"--{model_id.lower()}-meta.json" in list_json.lower()
-            ]
-        print(json_file_found)
-        assert len(json_file_found) == 1
+    json_files_found = [x for x in json_files_found if "model_combinations" not in x]
+    assert len(json_files_found) > 0
 
-        meta_info_json_path = json_file_found[0]
-        seg_file_info = input_nifti.split("--")
-        seg_id = seg_file_info[-2]
+    if any("-meta.json" in x for x in json_files_found):
+        print("-meta.json identified ...")
+        if len(json_files_found) == 1:
+            assert "-meta.json" in json_files_found[0]
+        else:
+            print("No single meta-json found -> search for specific config...")
+            model_id_search_string = f"--{model_id.lower()}-meta.json"
+            print(f"Search for {model_id_search_string=}")
+            json_files_found = [
+                x for x in json_files_found if model_id_search_string in x.lower()
+            ]
+            print(json_files_found)
+            assert len(json_files_found) == 1
+        meta_info_json_path = json_files_found[0]
+
+        seg_id = input_nifti.split("--")[-2]
         label_int = None
         label_name = None
         existing_configuration = {}
@@ -84,11 +76,13 @@ def get_seg_info(input_nifti):
                             label_name = part["TrackingIdentifier"]
                             break
 
-        if label_int is None or label_name is None:
-            return queue_dict, "label extraction issue"
+        assert label_name is not None
+        assert label_int is not None
+
         existing_configuration[label_name] = str(label_int)
 
-    elif len(json_files_found) > 0 and "seg_info" in json_files_found[0]:
+    elif any("seg_info" in x for x in json_files_found):
+        print("seg_info identified ...")
         json_files_found = [
             meta_json_path
             for meta_json_path in json_files_found
@@ -163,6 +157,7 @@ def collect_labels(queue_list):
                 if label_key not in found_label_keys:
                     found_label_keys.append(label_key)
 
+    # python's sorted() function sorts the list found_label_keys by default in an ascending sort in alphabetic (lexicographic) order.
     found_label_keys = sorted(found_label_keys)
     print(f"# Found {len(found_label_keys)} labels -> generating global seg info...")
 
@@ -172,6 +167,7 @@ def collect_labels(queue_list):
         label_encoding_counter += 1
         assert label_encoding_counter not in global_labels_info.values()
         assert label_found not in global_labels_info
+        # new globally valid label encodings get assigned to found_labels
         global_labels_info[label_found] = label_encoding_counter
     print("#")
     print("##################################################")
@@ -393,18 +389,18 @@ def check_overlap(gt_map, new_map, seg_nifti):
 def merge_niftis(queue_dict):
     global merge_found_niftis, global_labels_info, global_labels_info_count, merged_counter, delete_merged_data, fail_if_overlap, skipping_level
 
+    # load queue_dict entries to variables
     target_dir = queue_dict["target_dir"]
     base_image_path = queue_dict["base_image"]
     seg_nifti_list = queue_dict["seg_files"]
     multi = queue_dict["multi"]
     Path(target_dir).mkdir(parents=True, exist_ok=True)
 
+    # start merging process by defining new_gt_map as shaped as base_image
     base_image_loaded = nib.load(base_image_path)
     base_image_dimensions = base_image_loaded.shape
     try:
-        new_gt_map = np.zeros_like(
-            base_image_loaded.get_fdata().astype(int)
-        )  # This one fails!
+        new_gt_map = np.zeros_like(base_image_loaded.get_fdata().astype(int))
     except EOFError:
         return queue_dict, "false satori export"
     # new_gt_map_int_encodings = list(np.unique(new_gt_map))
@@ -422,6 +418,7 @@ def merge_niftis(queue_dict):
     print("#")
     print("#")
 
+    # iterate over corresponding seg_niftis of current base_image
     for seg_nifti in seg_nifti_list:
         seg_nifti_id = basename(seg_nifti).replace(".nii.gz", "")
 
@@ -435,6 +432,8 @@ def merge_niftis(queue_dict):
             local_labels_info = {"Clear Label": 0}
         print(f"# Processing NIFTI: {seg_nifti}")
         print("#")
+
+        # get existing_configuration from meta_info: {"<label_name>": <label_int>}
         existing_configuration = get_seg_info(input_nifti=seg_nifti)
 
         if existing_configuration is None:
@@ -445,6 +444,8 @@ def merge_niftis(queue_dict):
         print("#")
         print(f"# Loading NIFTI: {seg_nifti}")
         loaded_nib_nifti = nib.load(seg_nifti)
+
+        # check dims of seg_nifti and resample if not fitting with base_image's dims
         if base_image_dimensions != loaded_nib_nifti.shape:
             print("# Issue with different dimensions in seg-NIFTIS!")
             print("# -> starting resampling..")
@@ -460,7 +461,7 @@ def merge_niftis(queue_dict):
         else:
             print("# No resampling needed.")
 
-        print(f"#")
+        #
         transformations = check_transformations(current_config=existing_configuration)
         if len(transformations) == 0:
             print(f"# No transformations needed!")
@@ -874,6 +875,8 @@ if target_dict_dir is not None:
     print("#")
 
 batch_dir_path = join("/", workflow_dir, batch_name)
+
+### COMPOSE base_image_ref_dict ###
 # Loop for every batch-element (usually series)
 batch_folders = sorted([f for f in glob(join(batch_dir_path, "*"))])
 for batch_element_dir in batch_folders:
@@ -884,7 +887,25 @@ for batch_element_dir in batch_folders:
     base_input_dir = join(batch_element_dir, org_input_dir)
     seg_input_dir = join(batch_element_dir, operator_in_dir)
     base_files = sorted(glob(join(base_input_dir, "*.nii*"), recursive=False))
-    assert len(base_files) == 1
+    if len(base_files) != 1:
+        print("#")
+        print("#")
+        print(
+            f"# Something went wrong with DICOM to NIFTI conversion for series: {batch_element_dir}"
+        )
+        print(
+            "# Probaly the DICOM is corrupted, which results in multiple volumes after the conversion."
+        )
+        print(
+            "# You can manually remove this series from the tmp processing data and restart the SEG-Check operator."
+        )
+        print(f"# {base_files=}")
+        print("#")
+        print("# Abort")
+        print("#")
+        print("#")
+        exit(1)
+
     seg_files = sorted(glob(join(seg_input_dir, "*.nii*"), recursive=False))
     if len(seg_files) == 0:
         print("#")
@@ -942,8 +963,28 @@ for batch_element_dir in batch_folders:
         ][batch_element_dir]
 
     base_image_ref_dict[base_series_id]["batch_elements"] = batch_elements_sorted
+### base_image_ref_dict composed and is strcutured as described in the following
+# {
+#   "<ct_nifti_fname>": {
+#       "base_file": "<path_to_ct_nifti_fname>",
+#       "output_dir": "<path_to_segcheck_out_dir>",
+#       "batch_elements": {
+#           "<path_of_batch_element>": {
+#               "file_count": <number_of_segnifti_belonging_to_ctnifti>,
+#               "seg_files": [
+#                   <list_of_paths_to_segniftis>
+#               ]
+#           }
+#       }
+#   },
+#   "<ct_nifti_fname>": {
+#       ...
+#   }
+# }
 
+### COMPOSE queue_dicts ###
 queue_dicts = []
+# iterate over ct_nifti_fname of base_image_ref_dict
 for key in sorted(
     base_image_ref_dict.keys(),
     key=lambda key: base_image_ref_dict[key]["batch_elements"][
@@ -975,7 +1016,7 @@ for key in sorted(
     for batch_element_with_files, info_dict in batch_elements_with_files.items():
         if multi:
             segs_to_merge["batch_elements_to_remove"].append(batch_element_with_files)
-        if "--" not in info_dict["seg_files"][0]:
+        if not isinstance(info_dict["seg_files"][0].split("--")[-2], int):
             for seg_element_file in sorted(info_dict["seg_files"], reverse=False):
                 segs_to_merge["seg_files"].append(seg_element_file)
         else:
@@ -991,8 +1032,32 @@ for key in sorted(
 
         # for seg_element_file in info_dict["seg_files"]:
     queue_dicts.append(segs_to_merge)
+### queue_dicts composed and is strcutured as described in the following
+# [
+#   {
+#       "base_image": "<path_to_ct_nifti_fname>",
+#       "target_dir": "<path_to_segcheck_out_dir>",
+#       "multi": <indicator_whether_multiple_base_images_are_present>
+#       "seg_files": [
+#           <list_of_paths_to_segniftis>
+#       ],
+#       "batch_elements_to_remove": [
+#           <list_of_paths_of_base_images_to_remove>
+#       ],
+#   }
+# ]
 
+#
 if target_dict_dir is None:
+    # collects labels from all present batch elements, sorts in alphabetic order and assigns new ascending label encodings
+    # writes global_seg_info to global_seg_info.json:
+    # {
+    #     "Clear Label": 0,
+    #     "aorta": 1,
+    #     "esophagus": 2,
+    #     "gallbladder": 3,
+    #     ...,
+    # }
     collect_labels(queue_list=queue_dicts)
 
 print("#")
@@ -1097,7 +1162,7 @@ if processed_count == 0:
     print("#")
     print("##################################################")
     print("#")
-    # exit(1)
+    exit(1)
 else:
     print("#")
     print(f"# ----> {processed_count} FILES HAVE BEEN PROCESSED!")

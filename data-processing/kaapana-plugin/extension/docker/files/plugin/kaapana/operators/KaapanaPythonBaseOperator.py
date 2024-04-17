@@ -11,37 +11,6 @@ from kaapana.blueprints.kaapana_global_variables import (
     KAAPANA_BUILD_VERSION,
 )
 
-
-def rest_self_udpate(func):
-    """
-    Every operator which should be adjustable from an api call should add this as an decorator above the python_callable:
-    @rest_self_udpate
-    """
-
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if (
-            kwargs["dag_run"] is not None
-            and kwargs["dag_run"].conf is not None
-            and "rest_call" in kwargs["dag_run"].conf
-            and kwargs["dag_run"].conf["rest_call"] is not None
-        ):
-            payload = kwargs["dag_run"].conf["rest_call"]
-            operator_conf = {}
-            if "operators" in payload and self.name in payload["operators"]:
-                operator_conf.update(payload["operators"][self.name])
-            if "global" in payload:
-                operator_conf.update(payload["global"])
-
-            for k, v in operator_conf.items():
-                if k in self.__dict__.keys():
-                    self.__dict__[k] = v
-
-        return func(self, *args, **kwargs)
-
-    return wrapper
-
-
 class KaapanaPythonBaseOperator(PythonOperator, SkipMixin):
     def __init__(
         self,
@@ -74,6 +43,7 @@ class KaapanaPythonBaseOperator(PythonOperator, SkipMixin):
         delete_output_on_start=True,
         batch_name=None,
         airflow_workflow_dir=None,
+        priority_class_name=None,
         **kwargs
     ):
         KaapanaBaseOperator.set_defaults(
@@ -101,6 +71,7 @@ class KaapanaPythonBaseOperator(PythonOperator, SkipMixin):
             airflow_workflow_dir=airflow_workflow_dir,
             delete_input_on_success=delete_input_on_success,
             delete_output_on_start=delete_output_on_start,
+            priority_class_name=priority_class_name,
         )
 
         super().__init__(

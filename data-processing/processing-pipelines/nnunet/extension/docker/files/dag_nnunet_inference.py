@@ -17,7 +17,7 @@ concurrency = max_active_runs * 2
 default_interpolation_order = "default"
 default_prep_thread_count = 1
 default_nifti_thread_count = 1
-
+ae_title = "nnUnet-predict-results"
 available_pretrained_task_names, installed_tasks, all_selectable_tasks = get_tasks()
 
 properties_template = {
@@ -56,6 +56,7 @@ properties_template = {
         "type": "string",
         "required": True,
         "enum": [],
+        "default": "3d_lowres"
     },
     "inf_softmax": {
         "title": "enable softmax",
@@ -114,6 +115,10 @@ for idx, (task_name, task_values) in enumerate(all_selectable_tasks.items()):
             to_be_placed = task_values[key]
             if key == "model":
                 item["enum"] = to_be_placed
+                # set the first available model or `3d_lowres` as default model
+                item["default"] = next(iter(to_be_placed), None)
+                if '3d_lowres' in to_be_placed:
+                    item["default"] = "3d_lowres"
             else:
                 if isinstance(to_be_placed, list):
                     to_be_placed = ",".join(to_be_placed)
@@ -206,7 +211,9 @@ nrrd2dcmSeg_multi = Itk2DcmSegOperator(
     alg_name=alg_name,
 )
 
-dcmseg_send_multi = DcmSendOperator(dag=dag, input_operator=nrrd2dcmSeg_multi)
+dcmseg_send_multi = DcmSendOperator(
+    dag=dag, ae_title=ae_title, input_operator=nrrd2dcmSeg_multi
+)
 clean = LocalWorkflowCleanerOperator(dag=dag, clean_workflow_dir=True)
 
 get_task_model >> nnunet_predict

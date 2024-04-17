@@ -55,8 +55,8 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
     :param image: Docker image you wish to launch. Defaults to dockerhub.io,
         but fully qualified URLS will point to custom repositories
     :type image: str
-    :param: namespace: the namespace to run within kubernetes
-    :type: namespace: str
+    :param namespace: the namespace to run within kubernetes
+    :type namespace: str
     :param cmds: entrypoint of the container. (templated)
         The docker images's entrypoint is used if this is not provide.
     :type cmds: list of str
@@ -90,6 +90,8 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
     :type affinity: dict
     :param node_selectors: A dict containing a group of scheduling rules
     :type node_selectors: dict
+    :param tolerations: A V1Toleration list specifying pod tolerations
+    :type node_selectors: list[V1Toleration]
     :param config_file: The path to the Kublernetes config file
     :type config_file: str
     :param xcom_push: If xcom_push is True, the content of the file
@@ -126,7 +128,6 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         gpu_mem_mb_lmt=None,
         retries=1,
         retry_delay=timedelta(seconds=30),
-        priority_weight=1,
         execution_timeout=timedelta(minutes=90),
         max_active_tis_per_dag=None,
         manage_cache=None,
@@ -143,6 +144,8 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         arguments=None,
         env_vars=None,
         image_pull_secrets=None,
+        priority_weight=1,
+        priority_class_name="kaapana-low-priority",
         startup_timeout_seconds=120,
         namespace=JOBS_NAMESPACE,
         image_pull_policy=PULL_POLICY_IMAGES,
@@ -159,6 +162,7 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         config_file=None,
         xcom_push=False,
         node_selectors=None,
+        tolerations=None,
         secrets=None,
         kind="Pod",
         pool=None,
@@ -196,6 +200,7 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
             airflow_workflow_dir=airflow_workflow_dir,
             delete_input_on_success=delete_input_on_success,
             delete_output_on_start=delete_output_on_start,
+            priority_class_name=priority_class_name,
         )
 
         # Airflow
@@ -206,10 +211,8 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         self.retry_delay = retry_delay
 
         # helm
-        if dev_server not in [None, "code-server", "jupyterlab"]:
-            raise NameError(
-                "dev_server must be either None, code-server or jupyterlab!"
-            )
+        if dev_server not in [None, "code-server"]:
+            raise NameError("dev_server must be either None or code-server!")
         if dev_server is not None:
             self.execution_timeout = None
         self.dev_server = dev_server
@@ -232,6 +235,7 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         self.get_logs = get_logs
         self.image_pull_policy = image_pull_policy
         self.node_selectors = node_selectors or {}
+        self.tolerations = tolerations
         self.annotations = annotations or {}
         self.affinity = affinity or {}
         self.xcom_push = xcom_push
@@ -354,12 +358,16 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
 
         if self.pod_resources is None:
             pod_resources = PodResources(
-                request_cpu="{}m".format(self.cpu_millicores)
-                if self.cpu_millicores != None
-                else None,
-                limit_cpu="{}m".format(self.cpu_millicores + 100)
-                if self.cpu_millicores != None
-                else None,
+                request_cpu=(
+                    "{}m".format(self.cpu_millicores)
+                    if self.cpu_millicores != None
+                    else None
+                ),
+                limit_cpu=(
+                    "{}m".format(self.cpu_millicores + 100)
+                    if self.cpu_millicores != None
+                    else None
+                ),
                 request_memory="{}Mi".format(self.ram_mem_mb),
                 limit_memory="{}Mi".format(
                     self.ram_mem_mb_lmt
@@ -440,17 +448,6 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
             session=session,
         )
 
-    def rest_env_vars_update(self, payload):
-        operator_conf = {}
-        if "global" in payload:
-            operator_conf.update(payload["global"])
-        if "operators" in payload and self.name in payload["operators"]:
-            operator_conf.update(payload["operators"][self.name])
-
-        for k, v in operator_conf.items():
-            k = k.upper()
-            self.env_vars[k] = str(v)
-
     # The order of this decorators matters because of the whitelist_federated_learning variable, do not change them!
     @cache_operator_output
     @federated_sharing_decorator
@@ -474,12 +471,16 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
             63,
         )  # actually 63, but because of helm set to 53, maybe...
 
-        if (
-            "NODE_GPU_" in str(context["task_instance"].pool)
-            and str(context["task_instance"].pool).count("_") == 3
-        ):
-            gpu_id = str(context["task_instance"].pool).split("_")[2]
-            self.env_vars.update({"CUDA_VISIBLE_DEVICES": str(gpu_id)})
+        if "gpu_device" in context["task_instance"].executor_config:
+            self.env_vars.update(
+                {
+                    "CUDA_VISIBLE_DEVICES": str(
+                        context["task_instance"].executor_config["gpu_device"]["gpu_id"]
+                    )
+                }
+            )
+        else:
+            self.env_vars.update({"CUDA_VISIBLE_DEVICES": ""})
 
         if (
             context["dag_run"].conf is not None
@@ -488,20 +489,10 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         ):
             form_data = context["dag_run"].conf["form_data"]
             logging.info(form_data)
-            # form_envs = {}
-            # for form_key in form_data.keys():
-            #     form_envs[str(form_key.upper())] = str(form_data[form_key])
 
-            # self.env_vars.update(form_envs)
-            # logging.info("CONTAINER ENVS:")
-            # logging.info(json.dumps(self.env_vars, indent=4, sort_keys=True))
-            context["dag_run"].conf["rest_call"] = {"global": form_data}
-        if (
-            context["dag_run"].conf is not None
-            and "rest_call" in context["dag_run"].conf
-            and context["dag_run"].conf["rest_call"] is not None
-        ):
-            self.rest_env_vars_update(context["dag_run"].conf["rest_call"])
+            for key, value in form_data.items():
+                key = key.upper()
+                self.env_vars[key] = str(value)
 
         self.env_vars.update(
             {
@@ -516,7 +507,6 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
 
         logging.info("CONTAINER ENVS:")
         logging.info(json.dumps(self.env_vars, indent=4, sort_keys=True))
-
         if self.dev_server is not None:
             url = f"{KaapanaBaseOperator.HELM_API}/helm-install-chart"
             env_vars_sets = {}
@@ -590,17 +580,8 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
                     "release_name": release_name,
                     "sets": helm_sets,
                 }
-            elif self.dev_server == "jupyterlab":
-                payload = {
-                    "name": "jupyterlab-chart",
-                    "version": KAAPANA_BUILD_VERSION,
-                    "release_name": release_name,
-                    "sets": helm_sets,
-                }
             else:
-                raise NameError(
-                    "dev_server must be either None, code-server or jupyterlab!"
-                )
+                raise NameError("dev_server must be either None or code-server!")
             logging.info("payload")
             logging.info(payload)
             r = requests.post(url, json=payload)
@@ -637,11 +618,13 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
                 secrets=self.secrets,
                 labels=self.labels,
                 node_selectors=self.node_selectors,
+                tolerations=self.tolerations,
                 volumes=self.volumes,
                 volume_mounts=self.volume_mounts,
                 namespace=self.namespace,
                 image_pull_policy=self.image_pull_policy,
                 image_pull_secrets=self.image_pull_secrets,
+                priority_class_name=self.priority_class_name,
                 resources=self.pod_resources,
                 annotations=self.annotations,
                 affinity=self.affinity,
@@ -676,6 +659,12 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
                     )
             if self.xcom_push:
                 return result
+
+    def on_kill(self) -> None:
+        logging.info(
+            "##################################################### ON KILL!"
+        )
+        KaapanaBaseOperator.pod_stopper.stop_pod_by_name(pod_id=self.kube_name)
 
     def delete_operator_out_dir(self, run_id, operator_dir):
         logging.info(f"#### deleting {operator_dir} folders...!")
@@ -787,6 +776,7 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         airflow_workflow_dir,
         delete_input_on_success,
         delete_output_on_start,
+        priority_class_name,
     ):
         obj.name = name
 
@@ -808,6 +798,7 @@ class KaapanaBaseOperator(BaseOperator, SkipMixin):
         obj.whitelist_federated_learning = whitelist_federated_learning
         obj.delete_input_on_success = delete_input_on_success
         obj.delete_output_on_start = delete_output_on_start
+        obj.priority_class_name = priority_class_name
 
         obj.batch_name = batch_name if batch_name != None else BATCH_NAME
         obj.airflow_workflow_dir = (

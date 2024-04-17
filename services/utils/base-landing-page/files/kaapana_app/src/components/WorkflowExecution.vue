@@ -1,8 +1,18 @@
 <template>
   <v-card>
     <v-form v-model="valid" ref="executeWorkflow" lazy-validation>
-      <v-card-title>
+      <v-card-title class="d-flex justify-space-between">
         <h5>Workflow Execution</h5>
+        <v-tooltip bottom>
+          <template v-slot:activator="{ on, attrs }">
+            <v-btn v-on="on" @click='getKaapanaInstances()' small icon>
+              <v-icon color="primary" dark>
+                mdi-refresh
+              </v-icon> 
+            </v-btn> 
+          </template>
+          <span>refresh Workflow Execution component</span>
+        </v-tooltip>
       </v-card-title>
       <v-card-text>
         <v-container>
@@ -56,7 +66,7 @@
             <!-- don't do workflow_id rn-->
           </v-row>
           <!-- Data- and Workflow forms -->
-          <v-row :key="dag_id">
+          <v-row v-if="datasets_available" :key="dag_id">
             <v-col v-for="(schema, name) in schemas" cols="12">
               <!-- <p>{{name}}</p> -->
               <v-jsf
@@ -120,12 +130,11 @@
       </v-card-text>
       <v-card-actions v-if="available_dags.length">
         <v-spacer></v-spacer>
-        <v-btn color="primary" @click="submissionValidator()" dark="dark">
+        <v-btn color="primary" @click="submissionValidator()">
           Start Workflow
         </v-btn>
         <v-btn
           @click="isDialog ? cancel() : clearForm()"
-          dark="dark"
         >
           {{ this.isDialog ? "Cancel" : "Clear" }}
         </v-btn>
@@ -198,6 +207,7 @@ export default {
     dag_id(value) {
       this.formData = {};
       if (value !== null) {
+        this.workflow_name = value;
         // not directly set to this.schemas to avoid rerendering of components
         // copied to avoid changing the original schemas
         let schemas = JSON.parse(JSON.stringify(this.schemas_dict[value]));
@@ -216,7 +226,18 @@ export default {
         this.schemas = {};
         this.external_dag_id = null;
       }
-      this.workflow_name = value;
+      this.datasets_available = true;
+      if (this.schemas["data_form"] !== null ) {
+        Object.entries(this.schemas["data_form"]).forEach(([key, value]) => {
+          if ( key.startsWith("__emtpy__") ) {
+            this.datasets_available = false;
+            this.$notify({
+              type: "error",
+              title: "The selected runner instances have no common allowed datasets!",
+            });
+          }
+        });
+      }
       // functions have to be called after the schemas are set
     },
     external_dag_id() {
@@ -267,6 +288,7 @@ export default {
         // other stuff
         workflow_name: null, // or to ''
         showConfData: false,
+        datasets_available: true
       };
     },
     reset() {
@@ -316,7 +338,7 @@ export default {
         if (value && typeof value === "object") {
           this.findRequiredFields(value, result, fullKey);
           // } else if (key === 'required' && !('default' in obj) && !('enum' in obj)) {
-        } else if (key !== "readOnly" && key === "required" && !("enum" in obj) && !("readOnly" in obj)) {
+        } else if (key !== "readOnly" && key === "required" && !("enum" in obj)) {
           // only go here if it's no 'enum' data type (special case for nnunet-predict)
           result.push(fullKey);
         }
@@ -326,6 +348,15 @@ export default {
     submissionValidator() {
       let valid_check = [];
       let invalid_fields = [];
+      if ( this.datasets_available !== true) {
+       // NOT all checks have been successful --> return false
+       const message = "The selected runner instances have no common allowed datasets!";
+        this.$notify({
+          type: "error",
+          title: message,
+        });
+        return false;
+      }
       if (this.$refs.executeWorkflow.validate()) {
         // validate dag_id and workflow_name in any cases
         // extract form name and attribute names of form_requiredFields
@@ -498,7 +529,7 @@ export default {
             title: "Workflow successfully created!",
           });
           this.reset();
-          if (this.identifiers.length > 0) {
+          if (this.identifiers.length > 0 || this.$route.name == "data-upload") {
             this.$emit("successful");
           } else {
             this.$router.push({ name: "workflows" });
@@ -520,5 +551,8 @@ export default {
 <style scoped lang="scss">
 .is-invalid {
   border: 1px solid red;
+}
+.justify-space-between {
+  justify-content: 0;
 }
 </style>

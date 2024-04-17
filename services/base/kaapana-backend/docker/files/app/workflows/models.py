@@ -1,6 +1,10 @@
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime
-from sqlalchemy.orm import relationship
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime, Table
+from sqlalchemy.orm import relationship, Mapped
 from sqlalchemy.schema import UniqueConstraint, Index
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy_json import mutable_json_type
+
+from typing import List
 
 from app.database import Base
 
@@ -9,6 +13,20 @@ from app.database import Base
 #     Column('job_id', ForeignKey('job.id'), primary_key=True),
 #     Column('kaapana_instance_id', ForeignKey('kaapana_instance.id'), primary_key=True)
 # )
+identifiers2dataset = Table(
+    "identifier2dataset",
+    Base.metadata,
+    Column("identifier", ForeignKey("identifiers.id"), primary_key=True),
+    Column("dataset", ForeignKey("dataset.name"), primary_key=True),
+)
+
+
+class Identifier(Base):
+    __tablename__ = "identifiers"
+    id = Column(String, primary_key=True)
+    datasets = relationship(
+        "Dataset", secondary=identifiers2dataset, back_populates="identifiers"
+    )
 
 
 class Dataset(Base):
@@ -18,7 +36,9 @@ class Dataset(Base):
     username = Column(String(64))
     time_created = Column(DateTime(timezone=True))
     time_updated = Column(DateTime(timezone=True))
-    identifiers = Column(String(10485760))
+    identifiers = relationship(
+        "Identifier", secondary=identifiers2dataset, back_populates="datasets"
+    )
 
     # many-to-one relationship
     kaapana_id = Column(Integer, ForeignKey("kaapana_instance.id"))
@@ -37,8 +57,8 @@ class KaapanaInstance(Base):
     ssl_check = Column(Boolean(), index=True)
     fernet_key = Column(String(100))
     encryption_key = Column(String(100), default="")
-    allowed_dags = Column(String(102400), default="[]")
-    allowed_datasets = Column(String(102400), default="[]")  # , index=True)
+    allowed_dags = Column(mutable_json_type(dbtype=JSONB, nested=True), default={})
+    allowed_datasets = Column(mutable_json_type(dbtype=JSONB, nested=True), default=[])
     time_created = Column(DateTime(timezone=True))
     time_updated = Column(DateTime(timezone=True))
     automatic_update = Column(Boolean(), default=False, index=True)
@@ -100,10 +120,10 @@ class Job(Base):
     dag_id = Column(String(64))
     external_job_id = Column(Integer)
     owner_kaapana_instance_name = Column(String(64))
-    conf_data = Column(String(102400))
+    conf_data = Column(mutable_json_type(dbtype=JSONB, nested=True))
     status = Column(String(64), index=True)
     run_id = Column(String(64), index=True)
-    description = Column(String(1024), index=True)
+    description = Column(String(1024000), index=True)
     username = Column(String(64))
     time_created = Column(DateTime(timezone=True))
     time_updated = Column(DateTime(timezone=True))

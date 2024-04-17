@@ -40,7 +40,6 @@ INCLUDE_REVERSE_PROXY=false
 ######################################################
 # Individual platform configuration
 ######################################################
-
 CREDENTIALS_MINIO_USERNAME="{{ credentials_minio_username|default('kaapanaminio', true) }}"
 CREDENTIALS_MINIO_PASSWORD="{{ credentials_minio_password|default('Kaapana2020', true) }}"
 
@@ -48,7 +47,7 @@ GRAFANA_USERNAME="{{ credentials_grafana_username|default('admin', true) }}"
 GRAFANA_PASSWORD="{{ credentials_grafana_password|default('admin', true) }}"
 
 KEYCLOAK_ADMIN_USERNAME="{{ credentials_keycloak_admin_username|default('admin', true) }}"
-KEYCLOAK_ADMIN_PASSWORD="{{ credentials_keycloak_admin_password|default('Kaapana2020', true) }}"
+KEYCLOAK_ADMIN_PASSWORD="{{ credentials_keycloak_admin_password|default('Kaapana2020', true) }}" #  Minimum policy for production: 1 specialChar + 1 upperCase + 1 lowerCase and 1 digit + min-length = 8
 
 FAST_DATA_DIR="{{ fast_data_dir|default('/home/kaapana')}}" # Directory on the server, where stateful application-data will be stored (databases, processing tmp data etc.)
 SLOW_DATA_DIR="{{ slow_data_dir|default('/home/kaapana')}}" # Directory on the server, where the DICOM images will be stored (can be slower)
@@ -198,19 +197,15 @@ function get_domain {
         exit 1
     else
         echo -e "${GREEN}Server domain (FQDN): $DOMAIN ${NC}" > /dev/stderr;
-        # Probably no necessary, can be removed in the future!
-        # if [[ $DOMAIN =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        #     echo "${YELLOW}Detected an IP address as server domain, adding the IP: $DOMAIN to no_proxy"
-        #     INSERTLINE="no_proxy=$no_proxy,$DOMAIN"
-        #     grep -q '\bno_proxy\b.*\b'${DOMAIN}'\b' /etc/environment || sed -i '/no_proxy=/d' /etc/environment
-        #     grep -q '\bno_proxy\b.*\b'${DOMAIN}'\b' /etc/environment  && echo "$DOMAIN already part of no_proxy ...." ||  sh -c "echo '$INSERTLINE' >> /etc/environment"
-        # fi
     fi
 }
 
 function delete_deployment {
     echo -e "${YELLOW}Undeploy releases${NC}"
-    helm -n $HELM_NAMESPACE ls --deployed --failed --pending --superseded --uninstalling --date --reverse | awk 'NR > 1 { print  "-n "$2, $1}' | xargs -L1 -I % sh -c "helm -n $HELM_NAMESPACE uninstall ${NO_HOOKS} --wait --timeout 5m30s %; sleep 2"
+    for namespace in $ADMIN_NAMESPACE $HELM_NAMESPACE; do
+        helm -n $namespace ls --deployed --failed --pending --superseded --uninstalling --date --reverse | awk 'NR > 1 { print  "-n "$2, $1}' | xargs -L1 -I % sh -c "helm -n $namespace uninstall ${NO_HOOKS} --wait --timeout 5m30s %; sleep 2"
+    done
+
     echo -e "${YELLOW}Waiting until everything is terminated ...${NC}"
     WAIT_UNINSTALL_COUNT=100
     for idx in $(seq 0 $WAIT_UNINSTALL_COUNT)
@@ -293,9 +288,14 @@ function deploy_chart {
         exit 1
     fi
 
+    if [ "$OFFLINE_MODE" == "true" ] && [ -z "$CHART_PATH" ]; then
+        echo "${RED}ERROR: CHART_PATH needs to be set when in OFFLINE_MODE!${NC}"
+        exit 1
+    fi
+
     get_domain
     
-    if [ -z "$INSTANCE_NAME"]; then
+    if [ -z "$INSTANCE_NAME" ]; then
         INSTANCE_NAME=$DOMAIN
         echo "${YELLOW}No INSTANCE_NAME is set, setting it to $DOMAIN!${NC}"
     fi
@@ -324,17 +324,35 @@ function deploy_chart {
             echo -e "-> gpu-operator chart already exists"
         else
             if [ "$OFFLINE_MODE" = "true" ];then
+                SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
                 OFFLINE_ENABLE_GPU_PATH=$SCRIPT_DIR/offline_enable_gpu.py
                 [ -f $OFFLINE_ENABLE_GPU_PATH ] && echo "${GREEN}$OFFLINE_ENABLE_GPU_PATH exists ... ${NC}" || (echo "${RED}$OFFLINE_ENABLE_GPU_PATH does not exist -> exit ${NC}" && exit 1)
                 python3 $OFFLINE_ENABLE_GPU_PATH
+                if [ $? -eq 0 ]; then
+                    echo "Offline GPU enabled!"
+                else
+                    echo "Offline GPU deployment failed!"
+                    exit 1
+                fi
             else
                 microk8s.enable gpu
             fi
         fi
     fi
-    
-    if [ ! -z "$CHART_PATH" ]; then
-        echo -e "${YELLOW}Please note, since you have specified a chart file, you deploy the platform in OFFLINE_MODE='true'.${NC}"
+
+    if [ "$DEV_MODE" == "true" ]; then
+        KAAPANA_INIT_PASSWORD="kaapana"
+    else
+        KAAPANA_INIT_PASSWORD="Kaapana2020!"
+    fi
+
+    if [ "$OFFLINE_MODE" == "true" ] || [ "$DEV_MODE" == "false" ]; then
+        PULL_POLICY_IMAGES="IfNotPresent"
+    else
+        PULL_POLICY_IMAGES="Always"
+    fi
+        
+    if [ ! -z "$CHART_PATH" ]; then # Note: OFFLINE_MODE requires CHART_PATH 
         echo -e "${YELLOW}We assume that that all images are already presented inside the microk8s.${NC}"
         echo -e "${YELLOW}Images are uploaded either with a previous deployment from a docker registry or uploaded from a tar or directly uploaded during building the platform.${NC}"
 
@@ -369,21 +387,10 @@ function deploy_chart {
             echo -e "${GREEN}PRESENT_IMAGE_COUNT: OK ${NC}"
         fi
 
-        OFFLINE_MODE=true
-        DEV_MODE="false"
-        PULL_POLICY_IMAGES="IfNotPresent"
         PREFETCH_EXTENSIONS=false
-
         CONTAINER_REGISTRY_USERNAME=""
         CONTAINER_REGISTRY_PASSWORD=""
     else
-        
-        PULL_POLICY_IMAGES="IfNotPresent"
-
-        if [ "$DEV_MODE" == "true" ]; then
-            PULL_POLICY_IMAGES="Always"
-        fi
-
         echo "${YELLOW}Helm login registry...${NC}"
         check_credentials
         echo "${GREEN}Pulling platform chart from registry...${NC}"
@@ -433,11 +440,13 @@ function deploy_chart {
     --set-string global.slow_data_dir="$SLOW_DATA_DIR" \
     --set-string global.instance_uid="$INSTANCE_UID" \
     --set-string global.instance_name="$INSTANCE_NAME" \
+    --set-string global.dev_mode="$DEV_MODE" \
+    --set-string global.kaapana_init_password="$KAAPANA_INIT_PASSWORD" \
     {% for item in additional_env -%}--set-string {{ item.helm_path }}="${{ item.name }}" \
     {% endfor -%}
     --name-template "$PLATFORM_NAME"
 
-    # pull_policy_jobs and pull_policy_pods only there for backward compatibility as of version 0.1.3
+    # pull_policy_jobs and pull_policy_pods only there for backward compatibility as of version 0.2.0
     if [ ! -z "$CONTAINER_REGISTRY_USERNAME" ] && [ ! -z "$CONTAINER_REGISTRY_PASSWORD" ]; then
         rm $CHART_PATH
     fi
@@ -450,18 +459,22 @@ function deploy_chart {
 
 
 function pull_chart {
-    for i in 1 2 3 4 5;
+    MAX_RETRIES=30
+    i=1
+    while [ $i -le $MAX_RETRIES ];
     do
         echo -e "${YELLOW}Pulling chart: ${CONTAINER_REGISTRY_URL}/$PLATFORM_NAME with version $PLATFORM_VERSION ${NC}"
         helm pull oci://${CONTAINER_REGISTRY_URL}/$PLATFORM_NAME --version $PLATFORM_VERSION -d $1 \
             && break \
             || ( echo -e "${RED}Failed -> retry${NC}" && sleep 1 );
-        
-        if [ $i -eq 5 ];then
-            echo -e "${RED}Could not pull chart! -> abort${NC}"
-            exit 1
-        fi 
+        ((i++))
     done
+    if [ ! -f "${1}/${PLATFORM_NAME}-${PLATFORM_VERSION}.tgz" ];then
+        echo -e "${RED}Could not pull chart! -> abort${NC}"
+        echo -e "${YELLOW}This can be related to issues on the registry side or connection issues.${NC}"
+        echo -e "${YELLOW}Retrying the deployment script might solve this issue.${NC}"
+        exit 1
+    fi
 }
 
 function check_credentials {
@@ -479,6 +492,11 @@ function check_credentials {
 }
 
 function install_certs {
+    if [ "$EUID" -ne 0 ]
+    then echo -e "The installation of certs requires root privileges!";
+        exit 1
+    fi
+
     if [ ! -f ./tls.key ] || [ ! -f ./tls.crt ]; then
         echo -e "${RED}tls.key or tls.crt could not been found in this directory.${NC}"
         echo -e "${RED}Please rename and copy the files first!${NC}"
@@ -486,11 +504,12 @@ function install_certs {
     else
         echo -e "files found!"
         echo -e "Creating cluster secret ..."
-        microk8s.kubectl delete secret certificate -n $SERVICES_NAMESPACE
-        microk8s.kubectl create secret tls certificate --namespace $SERVICES_NAMESPACE --key ./tls.key --cert ./tls.crt
-        auth_proxy_pod=$(microk8s.kubectl get pods -n $SERVICES_NAMESPACE |grep oauth2-proxy  | awk '{print $1;}')
+        microk8s.kubectl delete secret certificate -n $ADMIN_NAMESPACE
+        microk8s.kubectl create secret tls certificate --namespace $ADMIN_NAMESPACE --key ./tls.key --cert ./tls.crt
+        auth_proxy_pod=$(microk8s.kubectl get pods -n $ADMIN_NAMESPACE |grep oauth2-proxy  | awk '{print $1;}')
         echo "auth_proxy_pod pod: $auth_proxy_pod"
-        microk8s.kubectl -n $SERVICES_NAMESPACE delete pod $auth_proxy_pod
+        microk8s.kubectl -n $ADMIN_NAMESPACE delete pod $auth_proxy_pod
+        cp ./tls.key ./tls.crt $FAST_DATA_DIR/tls/
     fi
 
     echo -e "${GREEN}DONE${NC}"
@@ -508,7 +527,7 @@ function print_deployment_done {
         echo -e "You should be welcomed by the login page."
         echo -e "Initial credentials:"
         echo -e "username: kaapana"
-        echo -e "password: kaapana ${NC}"
+        echo -e "password: ${KAAPANA_INIT_PASSWORD} ${NC}"
     fi
 }
 
@@ -835,6 +854,7 @@ _Flag: --remove-all-images-docker will delete all Docker images from the system
 _Flag: --no-hooks will purge all kubernetes deployments and jobs as well as all helm charts. Use this if the undeployment fails or runs forever.
 _Flag: --nuke-pods will force-delete all pods of the Kaapana deployment namespaces.
 _Flag: --quiet, meaning non-interactive operation
+_Flag: --offline, using prebuilt tarball and chart (--chart-path required!)
 
 _Argument: --username [Docker registry username]
 _Argument: --password [Docker registry password]
@@ -895,6 +915,12 @@ do
 
         --quiet)
             QUIET=true
+            shift # past argument
+        ;;
+        
+        --offline)
+            OFFLINE_MODE=true
+            echo -e "${GREEN}Deploying in offline mode!${NC}"
             shift # past argument
         ;;
 

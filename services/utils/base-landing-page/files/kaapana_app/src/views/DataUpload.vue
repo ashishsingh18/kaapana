@@ -1,6 +1,7 @@
 <template>
   <div class="dropzone">
-    <v-container grid-list-lg text-left >
+    <IdleTracker/>
+    <v-container grid-list-lg text-left fluid>
       <h1>Data upload</h1> 
       <v-row dense>
         <v-col cols="12">
@@ -13,7 +14,7 @@
               <br>
               <br>
               <code>
-                dcmsend -v {{ '<' }}ip-address-of-server{{ '>' }} 11112  --scan-directories --call {{ '<' }}dataset-name{{ '>' }} --scan-pattern '*.dcm'  --recurse {{ '<' }}data-dir-of-DICOM-images{{ '>' }}
+                dcmsend -v {{ '<' }}ip-address-of-server{{ '>' }} 11112 (default) --scan-directories --call {{ '<' }}dataset-name{{ '>' }} --scan-pattern '*.dcm'  --recurse {{ '<' }}data-dir-of-DICOM-images{{ '>' }}
               </code>
             </v-card-text>
           </v-card>
@@ -24,7 +25,7 @@
               Option 2: Upload the data via the browser(experimental).
             </v-card-title>
             <v-card-text>
-              <v-icon class="my-2" large>mdi-numeric-1-circle</v-icon>&nbsp; Make sure your data are correctly formatted for the upload.
+              <v-icon class="my-2" large>mdi-numeric-1-circle</v-icon>&nbsp; Make sure your data is correctly formatted for the upload.
               <v-btn
                 color="primary"
                 dark
@@ -47,42 +48,12 @@
                   </v-card-title>
                   <v-card-text>
                     <h3>Upload of DICOM data</h3>
-                    <p>DICOM data should be uploaded in a single compressed zip-file containing folder(s) with DICOM files. The default expected file ending for DICOMs is `.dcm`, but can be configured when triggering the ´import-dicoms-in-zip-to-internal-pacs´ workflow.</p>
+                    <p>DICOM data should be uploaded in a single compressed zip-file containing folder(s) with DICOM files.</p>
                     <h3>Upload NIfTI data</h3>
-                    <p>Since the platform works with the DICOM standard, NIfTI data are converted to DICOMs by triggering the workflow `convert-nifitis-to-dicoms-and-import-to-pacs`. If you have only NIfTI data without segmentations, the files with file endings `.nii.gz` or `.nii` can be uploaded either in a compressed zip-file or directly in a folder.
+                    <p>Since the platform works with the DICOM standard, NIfTI data is converted to DICOMs by triggering the workflow `convert-nifitis-to-dicoms-and-import-to-pacs`. If you have only NIfTI files without segmentations, the files with file endings `.nii.gz` or `.nii` can be uploaded in a compressed zip-file.
                     </p>
                     <p>
-                      For NIfTI data with segmentation the multiple folder structures are supported, which are outline in the <a href="https://kaapana.readthedocs.io/en/latest/" target="_blank">readthedocs of Kaapana</a>.
-                      <!-- structure of the <a href="https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/dataset_format_inference.md">nnunet dataset format</a> is expected. An example is given below:
-                      <pre>
-                      Dataset001_BrainTumour
-                          ├── dataset.json
-                          ├── imagesTr
-                          |   ├── BRATS_001_0000.nii.gz
-                          │   ├── BRATS_001_0001.nii.gz
-                          │   ├── BRATS_001_0002.nii.gz
-                          │   ├── BRATS_001_0003.nii.gz
-                          │   ├── BRATS_002_0000.nii.gz
-                          │   ├── BRATS_002_0001.nii.gz
-                          │   ├── BRATS_002_0002.nii.gz
-                          │   ├── BRATS_002_0003.nii.gz
-                          │   ├── ...
-                          ├── imagesTs  # optional
-                          │   ├── BRATS_485_0000.nii.gz
-                          │   ├── BRATS_485_0001.nii.gz
-                          │   ├── BRATS_485_0002.nii.gz
-                          │   ├── BRATS_485_0003.nii.gz
-                          │   ├── BRATS_486_0000.nii.gz
-                          │   ├── BRATS_486_0001.nii.gz
-                          │   ├── BRATS_486_0002.nii.gz
-                          │   ├── BRATS_486_0003.nii.gz
-                          │   ├── ...
-                          └── labelsTr
-                              ├── BRATS_001.nii.gz
-                              ├── BRATS_002.nii.gz
-                              ├── ...
-                      </pre>
-                      <br> -->
+                      For NIfTI data kaapana supports multiple ways to specify metadata for volumes and segmentations. Depending on the use case the data has to be formated in one of the directory structures described in the <a href="https://kaapana.readthedocs.io/en/stable/user_guide/workflows.html#import-uploaded-nifti-files" target="_blank">Kaapana documentation</a>.
                     </p>
                   </v-card-text>
 
@@ -118,7 +89,7 @@
         <WorkflowExecution
           :key="componentKey"
           :onlyLocal=true
-          kind_of_dags="minio"
+          kind_of_dags="import"
           :isDialog=true
           @successful="() => (workflowDialog = false)"
           @cancel="() => (workflowDialog = false)"
@@ -134,12 +105,14 @@
 import Vue from 'vue';
 import { mapGetters } from "vuex";
 import Upload from "@/components/Upload.vue";
+import IdleTracker from "@/components/IdleTracker.vue";
 import WorkflowExecution from "@/components/WorkflowExecution.vue";
 
 export default Vue.extend({
   components: {
     Upload,
-    WorkflowExecution
+    WorkflowExecution,
+    IdleTracker
   },
   data: () => ({
     workflowDialog: false,

@@ -1,5 +1,6 @@
 from asyncio import streams
-from typing import Optional, List
+from typing import Optional, List, Any
+from sqlalchemy_json import NestedMutableDict, NestedMutableList
 import json
 import datetime
 from pydantic import BaseModel, validator, root_validator
@@ -13,8 +14,8 @@ class KaapanaInstanceBase(BaseModel):
 
 class ClientKaapanaInstanceCreate(KaapanaInstanceBase):
     fernet_encrypted: bool
-    allowed_dags: list
-    allowed_datasets: list
+    allowed_dags: list = []
+    allowed_datasets: list = []
 
 
 class RemoteKaapanaInstanceCreate(KaapanaInstanceBase):
@@ -45,20 +46,15 @@ class KaapanaInstance(KaapanaInstanceBase):
     fernet_key: str
     encryption_key: str
     remote: bool
-    allowed_dags: Optional[str]
-    allowed_datasets: Optional[str]
+    allowed_dags: Optional[NestedMutableDict] = ...
+    allowed_datasets: Optional[NestedMutableList] = ...
     time_created: datetime.datetime
     time_updated: datetime.datetime
     workflow_in_which_involved: Optional[str]
 
     @validator("allowed_dags")
     def convert_allowed_dags(cls, v):
-        return sorted(json.loads(v))
-        # print(sorted(json.loads(v).keys()))
-
-    @validator("allowed_datasets")
-    def convert_allowed_datasets(cls, v):
-        return json.loads(v)
+        return sorted(v)
 
     @validator("time_created")
     def convert_time_created(cls, v):
@@ -74,6 +70,18 @@ class KaapanaInstance(KaapanaInstanceBase):
         else:
             return datetime.datetime.timestamp(v)
 
+    @classmethod
+    def clean_return(cls, instance):
+        instance.encryption_key = ""
+        return instance
+
+    @classmethod
+    def clean_full_return(cls, instance):
+        instance.encryption_key = ""
+        instance.fernet_key = ""
+        instance.token = ""
+        return instance
+
     class Config:
         orm_mode = True
 
@@ -85,13 +93,15 @@ class JobBase(BaseModel):
     description: str = None
     external_job_id: int = None  # job_id on another system
     # kaapana_instance_id: int
-    owner_kaapana_instance_name: str = None  # Remote Kaapana instance that is addressed, not external kaapana_instance_id!
+    owner_kaapana_instance_name: str = (
+        None  # Remote Kaapana instance that is addressed, not external kaapana_instance_id!
+    )
     service_job: Optional[bool] = False
 
 
 class Job(JobBase):
     id: int
-    conf_data: str
+    conf_data: Optional[NestedMutableDict] = ...
     username: str = None
     time_created: datetime.datetime
     time_updated: datetime.datetime
@@ -112,10 +122,6 @@ class Job(JobBase):
                 f'status must be on of the following values: {", ".join(allowed_states)}'
             )
         return v
-
-    @validator("conf_data")
-    def convert_conf_data(cls, v):
-        return json.loads(v)
 
     @validator("time_created")
     def convert_time_created(cls, v):
@@ -144,7 +150,9 @@ class JobCreate(JobBase):
 
 
 class JobUpdate(JobBase):
-    job_id: int  # not defined in model Workflow but still needed in client.py and crud.py
+    job_id: (
+        int  # not defined in model Workflow but still needed in client.py and crud.py
+    )
     # status: str
     # run_id: str = None
     # description: str = None
@@ -192,18 +200,7 @@ class Dataset(DatasetBase):
     time_created: datetime.datetime
     time_updated: datetime.datetime
     username: str = None
-    identifiers: Optional[str]
-
-    @validator("identifiers")
-    def convert_identifiers(cls, v):
-        return json.loads(v)
-
-    @validator("time_created")
-    def convert_time_created(cls, v):
-        if isinstance(v, datetime.datetime):
-            return v
-        else:
-            return datetime.datetime.timestamp(v)
+    identifiers: Optional[List[str]]
 
     @validator("time_updated")
     def convert_time_updated(cls, v):
@@ -218,11 +215,7 @@ class Dataset(DatasetBase):
 
 class AllowedDatasetCreate(DatasetBase):
     username: str = None
-    identifiers: Optional[str]
-
-    @validator("identifiers")
-    def convert_identifiers(cls, v):
-        return json.loads(v)
+    identifiers: Optional[List[str]]
 
     class Config:
         orm_mode = True
@@ -314,8 +307,8 @@ class WorkflowWithKaapanaInstanceWithJobs(WorkflowWithKaapanaInstance):
                 continue
             if "data_form" in job.conf_data and job.service_job == False:
                 dataset_name = (
-                    json.loads(job.conf_data)["data_form"]["dataset_name"]
-                    if "dataset_name" in json.loads(job.conf_data)["data_form"]
+                    job.conf_data["data_form"]["dataset_name"]
+                    if "dataset_name" in job.conf_data["data_form"]
                     else None
                 )
                 values["dataset_name"] = dataset_name

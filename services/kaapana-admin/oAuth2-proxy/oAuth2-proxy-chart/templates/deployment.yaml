@@ -82,10 +82,14 @@ spec:
           volumeMounts:
             - name: ssl-config
               mountPath: /ssl
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
       volumes:
       - name: ssl-config
         secret:
           secretName: certificate
+      priorityClassName: kaapana-high-priority
       imagePullSecrets:
       - name: registry-secret
 ---

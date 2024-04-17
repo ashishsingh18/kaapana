@@ -83,16 +83,20 @@ spec:
           - "/opt/keycloak/bin/kc.sh"
           - "--verbose"
           - "start"
+          - "--features=token-exchange"
           # livenessProbe:
           #   httpGet:
           #     path: /
           #     port: 8080
           #   initialDelaySeconds: 30
           #   periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
       volumes:
       - name: ssl-config-files
         secret:
           secretName: certificate
+      priorityClassName: kaapana-high-priority
       imagePullSecrets:
       - name: registry-secret
 ---

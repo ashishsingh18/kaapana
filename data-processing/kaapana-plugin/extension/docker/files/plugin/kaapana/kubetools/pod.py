@@ -17,7 +17,6 @@
 
 import kubernetes
 from kaapana.kubetools.resources import Resources
-import uuid
 
 
 class Pod:
@@ -61,12 +60,15 @@ class Pod:
         result=None,
         image_pull_policy="IfNotPresent",
         image_pull_secrets=None,
+        priority=None,
+        priority_class_name=None,
         init_containers=None,
         service_account_name=None,
         resources=None,
         annotations=None,
         restart_policy="Never",
         affinity=None,
+        tolerations=None,
     ):
         self.image = image
         self.envs = envs or {}
@@ -84,6 +86,8 @@ class Pod:
         self.namespace = namespace
         self.image_pull_policy = image_pull_policy
         self.image_pull_secrets = image_pull_secrets
+        self.priority = priority
+        self.priority_class_name = priority_class_name
         self.init_containers = init_containers
         self.service_account_name = service_account_name
         self.resources = resources or Resources()
@@ -93,6 +97,7 @@ class Pod:
         self.last_kube_status = None
         self.last_af_status = None
         self.task_instance = None
+        self.tolerations = tolerations or []
 
     def get_kube_object(self):
         pod_api_version = self.api_version
@@ -108,9 +113,19 @@ class Pod:
         pod_spec = kubernetes.client.V1PodSpec(containers=[])
         pod_spec.restart_policy = self.restart_policy
 
+        if self.priority_class_name is not None:
+            pod_spec.priority_class_name = self.priority_class_name
+
+        if self.priority is not None:
+            pod_spec.priority = self.priority
+
         # spec - node_selector
         if self.node_selectors is not None and len(self.node_selectors) is not 0:
             pod_spec.node_selector = self.node_selectors
+
+        # spec - tolerations
+        if self.tolerations is not None and len(self.tolerations) is not 0:
+            pod_spec.tolerations = self.tolerations
 
         # spec - init_container
         if self.init_containers is not None:
@@ -147,6 +162,7 @@ class Pod:
 
         pod_container.env = self.get_envs()
         pod_container.image = self.image
+        pod_container.image_pull_policy = self.image_pull_policy
         pod_container.image_pull_policy = self.image_pull_policy
 
         pod_container.resources = self.resources.get_kube_object()

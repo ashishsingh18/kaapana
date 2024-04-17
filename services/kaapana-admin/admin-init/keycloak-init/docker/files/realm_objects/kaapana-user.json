@@ -5,14 +5,7 @@
   "firstName" : "Default",
   "lastName" : "User",
   "email" : "not@available.com",
-  "attributes" : {
-    "policy" : [ "consoleAdmin" ]
-  },
   "requiredActions" : [ "UPDATE_PASSWORD" ],
   "realmRoles" : [ "default-roles-kaapana" ],
-  "credentials" : [ {
-    "type" : "password",
-    "value": "kaapana"
-  } ],
-  "groups": ["all_data"]
+  "groups": ["kaapana_admin"]
 }

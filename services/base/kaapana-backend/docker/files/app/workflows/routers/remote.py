@@ -37,7 +37,6 @@ async def get_minio_presigned_url(presigned_url: str = Header(...)):
     with requests.Session() as s:
         resp = requests_retry_session(session=s).get(
             f"http://minio-service.{settings.services_namespace}.svc:9000{presigned_url}",
-            timeout=TIMEOUT,
         )
     return Response(resp.content, resp.status_code)
 
@@ -51,16 +50,21 @@ async def post_minio_presigned_url(
         resp = requests_retry_session(session=s).put(
             f"http://minio-service.{settings.services_namespace}.svc:9000{presigned_url}",
             data=file.file,
-            timeout=TIMEOUT,
         )
     return Response(resp.content, resp.status_code)
 
 
+# deprecated should be removed, if unused
 @router.get("/job", response_model=schemas.JobWithKaapanaInstance)
 def get_job(job_id: int, db: Session = Depends(get_db)):
-    return crud.get_job(db, job_id)
+    job = crud.get_job(db, job_id)
+    job.kaapana_instance = schemas.KaapanaInstance.clean_full_return(
+        job.kaapana_instance
+    )
+    return job
 
 
+# deprecated should be removed, if unused
 @router.get("/jobs", response_model=List[schemas.JobWithKaapanaInstance])
 def get_jobs(
     instance_name: str = None,
@@ -68,14 +72,27 @@ def get_jobs(
     limit: int = None,
     db: Session = Depends(get_db),
 ):
-    return crud.get_jobs(db, instance_name, status, remote=True, limit=limit)
+    jobs = crud.get_jobs(db, instance_name, status, remote=True, limit=limit)
+    for job in jobs:
+        if job.kaapana_instance:
+            job.kaapana_instance = schemas.KaapanaInstance.clean_full_return(
+                job.kaapana_instance
+            )
+    return jobs
 
 
+# response_model should only return what is nessary (e.g. probably only success)
 @router.put("/job", response_model=schemas.JobWithKaapanaInstance)
 def put_job(job: schemas.JobUpdate, db: Session = Depends(get_db)):
-    return crud.update_job(db, job, remote=True)
+    job = crud.update_job(db, job, remote=True)
+    if job.kaapana_instance:
+        job.kaapana_instance = schemas.KaapanaInstance.clean_full_return(
+            job.kaapana_instance
+        )
+    return job
 
 
+# deprecated should be removed, if unused
 @router.delete("/job")
 def delete_job(job_id: int, db: Session = Depends(get_db)):
     return crud.delete_job(db, job_id, remote=True)

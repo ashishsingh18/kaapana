@@ -27,13 +27,13 @@ sys.path.insert(
 # -- Project information -----------------------------------------------------
 
 project = "Kaapana"
-copyright = "2022, MIC @DKFZ"
+copyright = "2024, MIC @DKFZ"
 author = "MIC @DKFZ"
 
 # The short X.Y version
-version = "0.1.4"
+version = "0.3.0"
 # The full version, including alpha/beta/rc tags
-release = "0.1.4"
+release = "0.3.0"
 
 
 # -- General configuration ---------------------------------------------------
@@ -98,7 +98,7 @@ master_doc = "index"
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = "en"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -116,7 +116,7 @@ pygments_style = None
 #
 # html_theme = 'alabaster'
 html_theme = "sphinx_rtd_theme"
-html_logo = "_static/img/kaapana_logo_mono.png"
+html_logo = "https://www.kaapana.ai/kaapana-downloads/kaapana-docs/stable/img/kaapana_logo_mono.png"
 html_theme_options = {
     "logo_only": True,
     "display_version": True,
@@ -132,6 +132,11 @@ html_theme_options = {
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
+
+# Add the Mermaid library to the static path
+html_js_files = [
+    "mermaid.min.js",
+]
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.

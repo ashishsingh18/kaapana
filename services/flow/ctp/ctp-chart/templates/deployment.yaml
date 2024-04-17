@@ -38,6 +38,9 @@ spec:
             - name: launcher-properties
               mountPath: /opt/CTP/Launcher.properties
               subPath: Launcher.properties
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
       volumes:
       - name: ctp-data
         persistentVolumeClaim:
@@ -57,6 +60,7 @@ spec:
           items:
           - key: Launcher.properties
             path: Launcher.properties
+      priorityClassName: kaapana-high-priority
       imagePullSecrets:
       - name: registry-secret
 ---

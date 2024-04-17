@@ -7,7 +7,7 @@ from git import Repo
 
 
 class BuildUtils:
-    max_build_rounds = 4
+    max_build_rounds = 5
     container_images_available = None
     container_images_unused = None
     charts_available = None
@@ -39,6 +39,8 @@ class BuildUtils:
     platform_build_branch = None
     platform_last_commit_timestamp = None
     enable_image_stats = None
+    trivy_utils = None
+    check_expired_vulnerabilities_database = None
 
     @staticmethod
     def add_container_images_available(container_images_available):
@@ -102,7 +104,11 @@ class BuildUtils:
                 .isoformat()
             )
             build_version = requested_repo.git.describe()
-            build_branch = requested_repo.active_branch.name.split("/")[-1]
+            try:
+                build_branch = requested_repo.active_branch.name.split("/")[-1]
+            except TypeError as e:
+                # detached HEAD
+                build_branch = "DETACHED-HEAD"
             version_check = semver.VersionInfo.parse(build_version)
 
         return build_version, build_branch, last_commit, last_commit_timestamp
@@ -116,9 +122,7 @@ class BuildUtils:
             if "root" in entry.lower():
                 continue
 
-            name = entry.split(":")[1]
-            version = entry.split(":")[2]
-            entry_id = f"{name}:{version}"
+            entry_id = entry.split(":",1)[1]
 
             if "chart:" in entry:
                 unused_chart = [
@@ -161,7 +165,7 @@ class BuildUtils:
                         f"{entry_id} not found in container_images_unused!"
                     )
 
-            if "local-only" in name or BuildUtils.default_registry in name:
+            if entry_id.startswith("local-only") or entry_id.startswith(BuildUtils.default_registry):
                 build_order.append(entry_id)
 
         return build_order

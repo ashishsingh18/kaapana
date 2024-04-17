@@ -11,10 +11,9 @@ from kaapana.operators.LocalWorkflowCleanerOperator import LocalWorkflowCleanerO
 from totalsegmentator.TotalSegmentatorOperator import TotalSegmentatorOperator
 from kaapana.operators.GetZenodoModelOperator import GetZenodoModelOperator
 from kaapana.operators.LocalMinioOperator import LocalMinioOperator
-from kaapana.operators.CombineMasksOperator import CombineMasksOperator
+from kaapana.operators.MergeMasksOperator import MergeMasksOperator
 from pyradiomics.PyRadiomicsOperator import PyRadiomicsOperator
 
-from kaapana.operators.GenerateThumbnailOperator import GenerateThumbnailOperator
 from kaapana.operators.LocalMinioOperator import LocalMinioOperator
 
 max_active_runs = 10
@@ -65,7 +64,7 @@ ui_forms = {
             },
             "preview": {
                 "title": "--preview",
-                "description": "Generate a png preview of segmentation.",
+                "description": "Generate a png preview for the segmentation.",
                 "type": "boolean",
                 "default": False,
                 "readOnly": False,
@@ -74,14 +73,14 @@ ui_forms = {
                 "title": "--statistics",
                 "description": "Calc volume (in mm3) and mean intensity. Results will be in statistics.json.",
                 "type": "boolean",
-                "default": True,
+                "default": False,
                 "readOnly": False,
             },
             "radiomics": {
                 "title": "--radiomics",
                 "description": "Calc radiomics features. Requires pyradiomics. Results will be in statistics_radiomics.json.",
                 "type": "boolean",
-                "default": True,
+                "default": False,
                 "readOnly": False,
             },
             "verbose": {
@@ -116,7 +115,7 @@ ui_forms = {
                 "title": "enable lung_vessels",
                 "description": "Add segmentations for lung_vessels and lung_trachea_bronchia.",
                 "type": "boolean",
-                "default": True,
+                "default": False,
                 "readOnly": False,
             },
             "cerebral_bleed": {
@@ -144,14 +143,14 @@ ui_forms = {
                 "title": "enable body",
                 "description": "Add segmentations for body, body_trunc, body_extremities, skin",
                 "type": "boolean",
-                "default": True,
+                "default": False,
                 "readOnly": False,
             },
             "pleural_pericard_effusion": {
                 "title": "enable pleural_pericard_effusion",
                 "description": "Add segmentations for pleural_effusion and pericardial_effusion.",
                 "type": "boolean",
-                "default": True,
+                "default": False,
                 "readOnly": False,
             },
             "nr_thr_resamp": {
@@ -218,7 +217,7 @@ ta = "total"
 total_segmentator_0 = TotalSegmentatorOperator(
     dag=dag, task=ta, input_operator=dcm2nifti
 )
-combine_masks_0 = CombineMasksOperator(
+combine_masks_0 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_0,
     parallel_id=ta,
@@ -261,7 +260,7 @@ total_segmentator_1 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_1 = CombineMasksOperator(
+combine_masks_1 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_1,
     parallel_id=ta,
@@ -303,7 +302,7 @@ total_segmentator_2 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_2 = CombineMasksOperator(
+combine_masks_2 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_2,
     parallel_id=ta,
@@ -345,7 +344,7 @@ total_segmentator_3 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_3 = CombineMasksOperator(
+combine_masks_3 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_3,
     parallel_id=ta,
@@ -387,7 +386,7 @@ total_segmentator_4 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_4 = CombineMasksOperator(
+combine_masks_4 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_4,
     parallel_id=ta,
@@ -429,7 +428,7 @@ total_segmentator_5 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_5 = CombineMasksOperator(
+combine_masks_5 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_5,
     parallel_id=ta,
@@ -471,7 +470,7 @@ total_segmentator_6 = TotalSegmentatorOperator(
     delete_output_on_start=False,
     parallel_id=ta,
 )
-combine_masks_6 = CombineMasksOperator(
+combine_masks_6 = MergeMasksOperator(
     dag=dag,
     input_operator=total_segmentator_6,
     parallel_id=ta,
@@ -502,7 +501,7 @@ pyradiomics_6 = PyRadiomicsOperator(
 put_to_minio = LocalMinioOperator(
     dag=dag,
     action="put",
-    bucket_name="thumbnails",
+    bucket_name="totalsegmentator",
     action_operators=[
         pyradiomics_0,
         pyradiomics_1,

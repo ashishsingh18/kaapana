@@ -36,8 +36,11 @@ class Settings(BaseSettings):
     keycloak_admin_username: str
     keycloak_admin_password: str
 
+    traefik_url: str
+
     airflow_url: str = os.getenv("AIRFLOW_URL")
     services_namespace: str = os.getenv("SERVICES_NAMESPACE")
+    admin_namespace: str = os.getenv("ADMIN_NAMESPACE", "admin")
 
 
 settings = Settings()

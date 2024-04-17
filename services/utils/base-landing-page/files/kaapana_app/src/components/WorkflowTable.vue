@@ -63,14 +63,18 @@
         {{ new Date(item.time_updated).toLocaleString() }}
       </template>
       <template v-slot:item.status="{ item }">
-        <v-chip
+        <v-btn
           v-for="state in getStatesColorMap(item, $vuetify.theme.dark)"
           :color="state.color"
           class="ml-1 my-chip"
           dense
-          small
-          outlined>{{ state.count }}
-        </v-chip>
+          x-small
+          rounded
+          outlined
+          @click="getJobsOfWorkflow(item.workflow_name, state.status, collapse=false)"
+        >
+          {{ state.count }}
+        </v-btn>
       </template>
       <template v-slot:item.actions="{ item }">
         <div v-if="item.service_workflow">
@@ -78,7 +82,7 @@
             <template v-slot:activator="{ on }">
               <v-icon v-on="on" color="primary" dark>mdi-account-hard-hat-outline</v-icon>
             </template>
-            <span> No actions for service workflows! </span>
+            <span>Service workflow actions are only allowed in job level, click to see all jobs </span>
           </v-tooltip>
         </div>
         <div v-else-if="!item.automatic_execution">
@@ -156,12 +160,8 @@ data () {
     search: '',
     expanded: [],
     workflowHeaders: [
-      {
-        text: 'Workflow ID',
-        align: 'start',
-        value: 'workflow_id',
-      },
       { text: 'Workflow Name', value: 'workflow_name' },
+      { text: 'Workflow ID', align: 'start', value: 'workflow_id' },
       { text: 'Dataset Name', value: 'dataset_name' },
       { text: 'Created', value: 'time_created' },
       { text: 'Updated', value: 'time_updated' },
@@ -169,19 +169,17 @@ data () {
       { text: 'Owner Instance', value: 'kaapana_instance.instance_name' },
       { text: 'Status', value: 'status', align: 'center'},
       { text: 'Actions', value: 'actions', sortable: false, filterable: false, align: 'center'},
-      // { text: 'Auto', value: 'automatic_execution', sortable: false, filterable: false, align: 'center'}
     ],
     expandedWorkflow: '',
     jobsofExpandedWorkflow: [],
     jobsofWorkflows: [],
-    states_jobsofWorkflow: [],
+    filteredJobState: undefined,
     manual_startID: '',
     abortID: '',
     restartID: '',
     deleteID: '',
-    hover: false,
-    activateAddRemote: false,
     shouldExpand: true,
+    shouldCollapse: true,
     localInstance: {},
     loading: false,
   }
@@ -207,7 +205,7 @@ computed: {
   filteredWorkflows() {  
     if (this.workflows !== null) {
       if (this.expandedWorkflow) {
-        this.getJobsOfWorkflow(this.expandedWorkflow.workflow_name)
+        this.getJobsOfWorkflow(this.expandedWorkflow.workflow_name, this.filteredJobState)
       }
       return this.workflows
     }
@@ -231,15 +229,25 @@ methods: {
   },
   expandRow(item) {
     if ( this.shouldExpand == true) {
-      if (item === this.expanded[0] ) {
+      if (item === this.expanded[0]) {
         // Clicked row is already expanded, so collapse it
-        this.expanded = []
-        this.expandedWorkflow = ''
+        if (this.shouldCollapse) {
+          // but only if it is wanted to collapse row
+          this.expanded = []
+          this.filteredJobState = undefined
+          this.expandedWorkflow = ''
+          this.loading = false
+        } else {
+          this.shouldCollapse = true
+          this.loading = false
+        }
       } else {
         // Clicked row is not expanded, so expand it
         this.expanded = [item]
         this.expandedWorkflow = item
-        this.getJobsOfWorkflow(this.expandedWorkflow.workflow_name)
+        if (!this.jobsofExpandedWorkflow) {
+          this.getJobsOfWorkflow(this.expandedWorkflow.workflow_name, this.filteredJobState)
+        }
       }
     } else {
       this.shouldExpand = true
@@ -256,12 +264,13 @@ methods: {
       'failed': 'red'
     }
     return Object.entries(colorMap).map(([state, color]) => ({
+      status: state,
       color: color,
       count: states.filter(_state => _state === state).length
     }))
   },
   redirectToAirflow() {
-    const airflow_url = this.localInstance.protocol + "://" + this.localInstance.host + "/flow/home"
+    const airflow_url = window.location.origin + "/flow/home"
     window.open(airflow_url, "_blank", "noreferrer")
   },
   startWorkflowManually(item) {
@@ -300,15 +309,25 @@ methods: {
         console.log(err);
       });
   },
-  getJobsOfWorkflow(workflow_name) {
+  getJobsOfWorkflow(workflow_name, state, collapse=true) {
+    if (typeof state !== "undefined") {
+      this.filteredJobState = state;
+    }
     this.loading = true
+    if (!collapse) {
+      this.shouldCollapse = collapse
+    }
     kaapanaApiService
       .federatedClientApiGet("/jobs",{
         workflow_name: workflow_name,
-        limit: 100,
+        status: state,
       }).then((response) => {
         if (response.data.length !== 0) {
           this.loading = false
+        } else {
+          // no jobs could be get from backend from this workflow in this state
+          // check whether workflow has at least any jobs
+          this.getSingleJobOfWorkflow(workflow_name)
         }
         if (this.expanded.length > 0) {
           this.jobsofExpandedWorkflow = response.data;
@@ -318,6 +337,27 @@ methods: {
       })
       .catch((err) => {
         this.loading = false
+        console.log(err);
+      })
+  },
+  getSingleJobOfWorkflow(workflow_name) {
+    kaapanaApiService
+      .federatedClientApiGet("/jobs",{
+        workflow_name: workflow_name,
+        limit: 1,
+      }).then((response) => {
+        if (response.data.length === 0) {
+          const message_title = `No jobs for workflow ${workflow_name}`
+          const message_text = `Workflow just triggered with >50 jobs? -> Jobs are created. \n
+                                Workflow triggered >20 seconds ago?    -> Error while creating jobs.`
+          this.$notify({
+            type: "warning",
+            title: message_title,
+            text: message_text,
+          })
+        }
+      })
+      .catch((err) => {
         console.log(err);
       })
   },
@@ -407,7 +447,7 @@ methods: {
       }).then((response) => {
         this.loading = false
         // positive notification
-        const message = `Successfully manually started workflow ${workflow_id}`
+        const message = `Successfully manually started workflow ${workflow_id}` 
         this.$notify({
           type: "success",
           title: message,

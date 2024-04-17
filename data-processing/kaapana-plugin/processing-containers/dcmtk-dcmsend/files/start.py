@@ -1,6 +1,7 @@
 import os
 import glob
 import time
+from typing import List
 import warnings
 from subprocess import PIPE, run
 import pydicom
@@ -10,13 +11,10 @@ from pathlib import Path
 HOST = os.getenv("HOST")
 PORT = os.getenv("PORT")
 HTTP_PORT = os.getenv("HTTP_PORT", "8080")
+### If the environment variable AETITLE is "NONE", then I want to set AETITLE = None
 AETITLE = os.getenv("AETITLE", "NONE")
 AETITLE = None if AETITLE == "NONE" else AETITLE
 LEVEL = os.getenv("LEVEL", "element")
-DICOM_GLOB_FILE_EXTENSION = os.getenv("DICOM_GLOB_FILE_EXTENSION", "*.dcm")
-
-check_arrival = os.getenv("CHECK_ARRIVAL", "False")
-check_arrival = True if check_arrival.lower() == "true" else False
 
 print(f"AETITLE: {AETITLE}")
 print(f"LEVEL: {LEVEL}")
@@ -24,66 +22,29 @@ print(f"LEVEL: {LEVEL}")
 dicom_sent_count = 0
 
 
-def send_dicom_data(send_dir, aetitle=AETITLE, check_arrival=False, timeout=60):
+def send_dicom_data(send_dir, aetitle=AETITLE, timeout=60):
     global dicom_sent_count
 
-    def check_if_arrived(seriesUID):
-        print("#")
-        print("############### Check if DICOMs arrived ###############")
-        print("#")
-        max_tries = 30
-        tries = 0
+    dicom_list: List[Path] = sorted(
+        [
+            f
+            for f in Path(send_dir).rglob("*")
+            if f.is_file() and pydicom.misc.is_dicom(f)
+        ]
+    )
 
-        while tries < max_tries:
-            pacs_dcmweb_endpoint = (
-                f"http://{HOST}:{HTTP_PORT}/dcm4chee-arc/aets/KAAPANA/rs/instances"
-            )
-
-            payload = {"SeriesInstanceUID": seriesUID}
-            print("#")
-            print(f"# request: {pacs_dcmweb_endpoint}: {payload}")
-            print("#")
-            httpResponse = requests.get(pacs_dcmweb_endpoint, params=payload, timeout=2)
-            if httpResponse.status_code == 200:
-                print("# Series found -> success !")
-                break
-            else:
-                print("# Series not found -> sleep 2s !")
-                tries += 1
-                time.sleep(2)
-
-        print("#")
-        print("# Done")
-        print("#")
-        if tries >= max_tries:
-            print("# -> too many failed requests -> Error!")
-            print("# ABORT")
-            return False
-        else:
-            return True
-
-    if (
-        len(
-            list(
-                filter(
-                    lambda f: f.is_file(),
-                    Path(send_dir).rglob(DICOM_GLOB_FILE_EXTENSION),
-                )
-            )
-        )
-        == 0
-    ):
+    if len(dicom_list) == 0:
         print(send_dir)
         print("############### No dicoms found...! Skipping to next Batch.")
         # raise FileNotFoundError # Not very elegant, but it still fails if nothing is processed. Maybe would be better if the dag would specify an "allow partial fail" parameter.
         return
 
     for dicom_dir, _, _ in os.walk(send_dir):
-        dicom_list = list(
-            filter(
-                lambda f: f.is_file(), Path(dicom_dir).glob(DICOM_GLOB_FILE_EXTENSION)
-            )
-        )
+        dicom_list = [
+            f
+            for f in Path(dicom_dir).glob("*")
+            if f.is_file() and pydicom.misc.is_dicom(f)
+        ]
 
         if len(dicom_list) == 0:
             continue
@@ -147,11 +108,7 @@ def send_dicom_data(send_dir, aetitle=AETITLE, check_arrival=False, timeout=60):
                 else:
                     print(f"Success! output: {output}")
                     print("")
-                    if check_arrival and not check_if_arrived(seriesUID=series_uid):
-                        print(f"Arrival check failed!")
-                        # exit(1)
-                    else:
-                        break
+                    break
             except Exception as e:
                 print(f"Something went wrong: {e}, trying again!")
 
@@ -181,14 +138,14 @@ if LEVEL == "element":
         element_input_dir = os.path.join(
             batch_element_dir, os.environ["OPERATOR_IN_DIR"]
         )
-        send_dicom_data(element_input_dir, check_arrival=check_arrival, timeout=600)
+        send_dicom_data(element_input_dir, timeout=600)
 
 elif LEVEL == "batch":
     batch_input_dir = os.path.join(
         "/", os.environ["WORKFLOW_DIR"], os.environ["OPERATOR_IN_DIR"]
     )
     print(f"Sending DICOM data from batch-level: {batch_input_dir}")
-    send_dicom_data(batch_input_dir, check_arrival=check_arrival, timeout=3600)
+    send_dicom_data(batch_input_dir, timeout=3600)
 else:
     raise NameError(
         'level must be either "element" or "batch". \

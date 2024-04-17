@@ -18,7 +18,7 @@ spec:
       - name: alertmanager
         image: "{{ .Values.global.registry_url }}/alert-manager:{{ .Values.global.kaapana_build_version  }}"
         imagePullPolicy:  {{ .Values.global.pull_policy_images }}
-        command: ["/bin/alertmanager"]
+        # command: ["/bin/alertmanager"]
         args: ["--config.file=/conf/alertmanager.yml","--storage.path=/alertmanager"]
         ports:
         - containerPort: 9003
@@ -32,6 +32,9 @@ spec:
           - name: alertmanager-config-file
             mountPath: /conf/alertmanager.yml
             subPath: alertmanager.yml
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
       volumes:
       - name: alertmanager-config-file
         configMap:

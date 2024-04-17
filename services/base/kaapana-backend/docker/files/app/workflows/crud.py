@@ -14,11 +14,14 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException, Response
 from psycopg2.errors import UniqueViolation
 from sqlalchemy import desc
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, NoResultFound
 from sqlalchemy.orm import Session
+from sqlalchemy import func, cast, String, JSON
+
 from urllib3.util import Timeout
 
 from app.config import settings
+from app.database import SessionLocal
 from . import models, schemas
 from .schemas import DatasetCreate
 from .utils import (
@@ -106,9 +109,9 @@ def get_kaapana_instances(
         return (
             db.query(models.KaapanaInstance)
             .filter(
-                models.KaapanaInstance.allowed_dags.contains(
+                cast(models.KaapanaInstance.allowed_dags, String).contains(
                     filter_kaapana_instances.dag_id
-                ),
+                )
             )
             .all()
         )
@@ -129,7 +132,7 @@ def get_kaapana_instances(
         return (
             db.query(models.KaapanaInstance)
             .filter(
-                models.KaapanaInstance.allowed_dags.contains(
+                cast(models.KaapanaInstance.allowed_dags, String).contains(
                     filter_kaapana_instances.dag_id
                 ),
                 models.KaapanaInstance.instance_name.in_(
@@ -192,11 +195,9 @@ def create_and_update_client_kaapana_instance(
             or False,
         )
     elif action == "update":
-        allowed_dags = json.dumps(
-            get_dag_list(
-                only_dag_names=False,
-                filter_allowed_dags=client_kaapana_instance.allowed_dags,
-            )
+        allowed_dags = get_dag_list(
+            only_dag_names=False,
+            filter_allowed_dags=client_kaapana_instance.allowed_dags,
         )
 
         fernet = Fernet(db_client_kaapana_instance.encryption_key)
@@ -205,13 +206,15 @@ def create_and_update_client_kaapana_instance(
             db_dataset = get_dataset(db, name=dataset_name, raise_if_not_existing=False)
             if db_dataset:
                 dataset = schemas.AllowedDatasetCreate(**(db_dataset).__dict__).dict()
+                dataset["identifiers"] = [
+                    identifier.id for identifier in db_dataset.identifiers
+                ]
                 if "identifiers" in dataset:
                     dataset["identifiers"] = [
                         fernet.encrypt(identifier.encode()).decode()
                         for identifier in dataset["identifiers"]
                     ]
                 allowed_datasets.append(dataset)
-        allowed_datasets = json.dumps(allowed_datasets)
 
         db_client_kaapana_instance.instance_name = (settings.instance_name,)
         db_client_kaapana_instance.time_updated = utc_timestamp
@@ -261,7 +264,11 @@ def create_and_update_remote_kaapana_instance(
             raise HTTPException(
                 status_code=400, detail="Kaapana instance already exists!"
             )
-        if "" in [remote_kaapana_instance.host, remote_kaapana_instance.instance_name, remote_kaapana_instance.token]:
+        if "" in [
+            remote_kaapana_instance.host,
+            remote_kaapana_instance.instance_name,
+            remote_kaapana_instance.token,
+        ]:
             raise HTTPException(
                 status_code=400, detail="Instance name, Host and Token must be defined!"
             )
@@ -292,10 +299,10 @@ def create_and_update_remote_kaapana_instance(
             f"Externally updating with db_remote_kaapana_instance: {db_remote_kaapana_instance}"
         )
         if db_remote_kaapana_instance:
-            db_remote_kaapana_instance.allowed_dags = json.dumps(
+            db_remote_kaapana_instance.allowed_dags = (
                 remote_kaapana_instance.allowed_dags
             )
-            db_remote_kaapana_instance.allowed_datasets = json.dumps(
+            db_remote_kaapana_instance.allowed_datasets = (
                 remote_kaapana_instance.allowed_datasets
             )
             db_remote_kaapana_instance.automatic_update = (
@@ -338,7 +345,8 @@ def create_job(db: Session, job: schemas.JobCreate, service_job: str = False):
         and "federated_bucket" in job.conf_data["federated_form"]
         and "federated_operators" in job.conf_data["federated_form"]
     ):
-        minio_urls = HelperMinio.add_minio_urls(
+        minioClient = HelperMinio()
+        minio_urls = minioClient.add_minio_urls(
             job.conf_data["federated_form"], db_kaapana_instance.instance_name
         )
         job.conf_data["federated_form"]["minio_urls"] = minio_urls
@@ -347,7 +355,7 @@ def create_job(db: Session, job: schemas.JobCreate, service_job: str = False):
 
     db_job = models.Job(
         # id = job.id,    # not sure if this shouldn't be set automatically
-        conf_data=json.dumps(job.conf_data),
+        conf_data=job.conf_data,
         time_created=utc_timestamp,
         time_updated=utc_timestamp,
         external_job_id=job.external_job_id,
@@ -391,7 +399,7 @@ def create_job(db: Session, job: schemas.JobCreate, service_job: str = False):
             **{
                 "job_id": db_job.id,
                 "status": "scheduled",
-                "description": "The workflow was triggered!",
+                # "description": "The workflow was triggered!",
             }
         )
         update_job(db, job, remote=False)
@@ -520,13 +528,13 @@ def update_job(db: Session, job=schemas.JobUpdate, remote: bool = True):
 
     db_job = get_job(db, job.job_id, job.run_id)
 
-    # update jobs of own db which are remotely executed (def update_job() is in this case called from remote.py's def put_job())
-    if db_job.kaapana_instance.remote:
+    # update remote jobs in local db (def update_job() called from remote.py's def put_job() with remote=True)
+    if db_job.kaapana_instance.remote and remote:
         db_job.status = job.status
 
     if job.status == "scheduled" and db_job.kaapana_instance.remote == False:
         # or (job.status == 'failed'); status='scheduled' for restarting, status='failed' for aborting
-        conf_data = json.loads(db_job.conf_data)
+        conf_data = db_job.conf_data
         conf_data["client_job_id"] = db_job.id
         dag_id_and_dataset = check_dag_id_and_dataset(
             db_job.kaapana_instance,
@@ -608,23 +616,18 @@ def abort_job(db: Session, job=schemas.JobUpdate, remote: bool = True):
 
 
 def get_job_taskinstances(db: Session, job_id: int = None):
-    db_job = get_job(db, job_id)  # query job by job_id
-    response = get_dagrun_tasks_airflow(
-        db_job.dag_id, db_job.run_id
-    )  # get task_instances w/ states via dag_id and run_id
+    # query job by job_id
+    db_job = get_job(db, job_id)
+    # get task_instances w/ states via dag_id and run_id
+    response = get_dagrun_tasks_airflow(db_job.dag_id, db_job.run_id)
 
     # parse received response
     response_text = json.loads(response.text)
-    ti_state_dict = eval(
-        response_text["message"][0]
-    )  # convert dict-like strings to dicts
-    ti_exdate_dict = eval(response_text["message"][1])
 
     # compose dict in style {"task_instance": ["execution_time", "state"]}
     tis_n_state = {}
-    for key in ti_state_dict:
-        time_n_state = [ti_exdate_dict[key], ti_state_dict[key]]
-        tis_n_state[key] = time_n_state
+    for key, value in response_text.items():
+        tis_n_state[key] = [value["execution_date"], value["state"]]
 
     return tis_n_state
 
@@ -672,8 +675,8 @@ def sync_client_remote(
 
     update_remote_instance_payload = {
         "instance_name": db_client_kaapana.instance_name,
-        "allowed_dags": json.loads(db_client_kaapana.allowed_dags),
-        "allowed_datasets": json.loads(db_client_kaapana.allowed_datasets),
+        "allowed_dags": db_client_kaapana.allowed_dags,
+        "allowed_datasets": db_client_kaapana.allowed_datasets,
         "automatic_update": db_client_kaapana.automatic_update,
         "automatic_workflow_execution": db_client_kaapana.automatic_workflow_execution,
     }
@@ -766,8 +769,8 @@ def get_remote_updates(db: Session, periodically=False):
             continue
         update_remote_instance_payload = {
             "instance_name": db_client_kaapana.instance_name,
-            "allowed_dags": json.loads(db_client_kaapana.allowed_dags),
-            "allowed_datasets": json.loads(db_client_kaapana.allowed_datasets),
+            "allowed_dags": db_client_kaapana.allowed_dags,
+            "allowed_datasets": db_client_kaapana.allowed_datasets,
             "automatic_update": db_client_kaapana.automatic_update,
             "automatic_workflow_execution": db_client_kaapana.automatic_workflow_execution,
         }
@@ -937,10 +940,61 @@ def sync_states_from_airflow(db: Session, status: str = None, periodically=False
                 }
             )
             update_job(db, job_update, remote=False)
+
+            if status == "running":
+                # update running job's operator states
+                update_running_jobs_operator(db, diff_db_job)
+
     elif len(diff_airflow_to_db) == 0 and len(diff_db_to_airflow) == 0:
         pass  # airflow and db in sync :)
     else:
         logging.error("Error while syncing kaapana-backend with Airflow")
+
+    # check operator details for jobs in status="running"
+    if status == "running":
+        for airflow_job_in_state in airflow_jobs_in_state:
+            # get corresponding db_job object from db
+            db_job = get_job(db, run_id=airflow_job_in_state["run_id"])
+
+            # update running job's operator states
+            update_running_jobs_operator(db, db_job)
+
+
+def update_running_jobs_operator(db: Session, db_job: models.Job):
+    # get operator states of current job from airflow
+    airflow_dagrun_operator_details = get_dagrun_tasks_airflow(
+        db_job.dag_id, db_job.run_id
+    )
+    if airflow_dagrun_operator_details.ok:
+        # extract operator state details from airflow response
+        airflow_dagrun_operator_details_text = json.loads(
+            airflow_dagrun_operator_details.text
+        )
+
+        # convert None values in dict to empty strings
+        def replace_none_with_empty(d):
+            for key, value in d.items():
+                if isinstance(value, dict):
+                    replace_none_with_empty(value)
+                elif value is None or value == "None":
+                    d[key] = ""
+            return d
+
+        airflow_dagrun_operator_details_text = replace_none_with_empty(
+            airflow_dagrun_operator_details_text
+        )
+
+        # update job object with operator's state as description
+        job_update = schemas.JobUpdate(
+            **{
+                "job_id": db_job.id,
+                "description": f"{airflow_dagrun_operator_details_text}",
+            }
+        )
+        update_job(db, job_update, remote=False)
+
+
+global_service_jobs = {}
 
 
 def create_and_update_service_workflows_and_jobs(
@@ -949,6 +1003,28 @@ def create_and_update_service_workflows_and_jobs(
     diff_job_runid: str = None,
     status: str = None,
 ):
+    # additional security buffer to check if current incoming service-job already exists
+    # check if service-workflow buffer already exists in global_service_jobs dict
+    if diff_job_dagid not in global_service_jobs:
+        # if not: add service-workflow buffer
+        global_service_jobs[diff_job_dagid] = []
+        logging.info(
+            f"Add new service-workflow to service-job-buffer mechanism: {diff_job_dagid}"
+        )
+    # to keep service-workflow lists of gloval_service_jobs small, check whether list exceeds 200 elements, if yes remove oldest 100 elements
+    if len(global_service_jobs[diff_job_dagid]) > 200:
+        del global_service_jobs[diff_job_dagid][0:99]
+    # check if current incoming service-job is already in buffer
+    if diff_job_runid in global_service_jobs[diff_job_dagid]:
+        # if yes: current incoming service-job will be created in backend --> return
+        logging.warn(
+            f"Prevented service-jobs from being scheduled multiple times: {diff_job_runid}"
+        )
+        return
+    else:
+        # if not: add current incoming service-job to buffer and continue with creating it
+        global_service_jobs[diff_job_dagid].append(diff_job_runid)
+
     # get local kaapana instance
     db_local_kaapana_instance = get_kaapana_instance(db)
 
@@ -976,7 +1052,7 @@ def create_and_update_service_workflows_and_jobs(
         workflow_update = schemas.WorkflowUpdate(
             **{
                 "workflow_id": db_service_workflow.workflow_id,
-                "workflow_name": f"{db_job.dag_id}-service-workflow",
+                "workflow_name": db_service_workflow.workflow_name,
                 "workflow_jobs": [db_job],
             }
         )
@@ -984,31 +1060,37 @@ def create_and_update_service_workflows_and_jobs(
         logging.debug(f"Updated service workflow: {db_service_workflow}")
     else:
         # if no: compose WorkflowCreate to create service-workflow ...
-        workflow_create = schemas.WorkflowCreate(
-            **{
-                "workflow_id": f"ID-{''.join([substring[0] for substring in db_job.dag_id.split('-')])}",
-                "workflow_name": f"{db_job.dag_id}-service-workflow",
-                "kaapana_instance_id": db_local_kaapana_instance.id,
-                "dag_id": db_job.dag_id,
-                "service_workflow": True,
-                "username": "system",
-                # "username": request.headers["x-forwarded-preferred-username"],
-            }
+        workflow_id = (
+            f"{''.join([substring[0] for substring in db_job.dag_id.split('-')])}"
         )
-        db_service_workflow = create_workflow(
-            db=db, workflow=workflow_create, service_workflow=True
-        )
-        logging.debug(f"Created service workflow: {db_service_workflow}")
-        # ... and afterwards append service-jobs to service-workflow via crud.put_workflow_jobs()
-        workflow_update = schemas.WorkflowUpdate(
-            **{
-                "workflow_id": db_service_workflow.workflow_id,
-                "workflow_name": db_service_workflow.workflow_name,
-                "workflow_jobs": [db_job],
-            }
-        )
-        db_service_workflow = put_workflow_jobs(db, workflow_update)
-        logging.debug(f"Updated service workflow: {db_service_workflow}")
+        # should normally be not necessary, but additional safety net to not create 2x the same service-workflow
+        db_service_workflow = get_workflow(db, dag_id=workflow_id)
+        if not db_service_workflow:
+            workflow_create = schemas.WorkflowCreate(
+                **{
+                    "workflow_id": workflow_id,
+                    "workflow_name": f"{db_job.dag_id}-{workflow_id}",
+                    "kaapana_instance_id": db_local_kaapana_instance.id,
+                    "dag_id": db_job.dag_id,
+                    "service_workflow": True,
+                    "username": "system",
+                    # "username": request.headers["x-forwarded-preferred-username"],
+                }
+            )
+            db_service_workflow = create_workflow(
+                db=db, workflow=workflow_create, service_workflow=True
+            )
+            logging.info(f"Created service workflow: {db_service_workflow}")
+            # ... and afterwards append service-jobs to service-workflow via crud.put_workflow_jobs()
+            workflow_update = schemas.WorkflowUpdate(
+                **{
+                    "workflow_id": db_service_workflow.workflow_id,
+                    "workflow_name": db_service_workflow.workflow_name,
+                    "workflow_jobs": [db_job],
+                }
+            )
+            db_service_workflow = put_workflow_jobs(db, workflow_update)
+            logging.info(f"Updated service workflow: {db_service_workflow}")
 
 
 # def sync_states_from_airflow(db: Session, status: str = None, periodically=False):
@@ -1093,6 +1175,19 @@ def sync_n_clean_qsr_jobs_with_airflow(db: Session, periodically=False):
         update_job(db, job_update, remote=False)
 
 
+def create_or_get_identifier(db: Session, identifier: string) -> models.Identifier:
+    try:
+        return db.query(models.Identifier).filter_by(id=identifier).one()
+    except NoResultFound:
+        try:
+            with db.begin_nested():
+                instance = models.Identifier(id=identifier)
+                db.add(instance)
+                return instance
+        except IntegrityError:
+            return db.query(models.Identifier).filter_by(id=identifier).one()
+
+
 def create_dataset(db: Session, dataset: schemas.DatasetCreate):
     logging.debug(f"Creating Dataset: {dataset.name}")
 
@@ -1115,10 +1210,12 @@ def create_dataset(db: Session, dataset: schemas.DatasetCreate):
 
     utc_timestamp = get_utc_timestamp()
 
+    db_identifiers = [create_or_get_identifier(db, idx) for idx in dataset.identifiers]
+
     db_dataset = models.Dataset(
         username=dataset.username,
         name=dataset.name,
-        identifiers=json.dumps(dataset.identifiers),
+        identifiers=db_identifiers,
         time_created=utc_timestamp,
         time_updated=utc_timestamp,
     )
@@ -1193,20 +1290,17 @@ def update_dataset(db: Session, dataset=schemas.DatasetUpdate):
         )
         logging.debug(f"Dataset {dataset.name} created.")
 
+    db_identifiers = [create_or_get_identifier(db, idx) for idx in dataset.identifiers]
+
     if dataset.action == "ADD":
-        db_dataset.identifiers = json.dumps(
-            list(set(dataset.identifiers + json.loads(db_dataset.identifiers)))
-        )
+        for identifier in db_identifiers:
+            if identifier not in db_dataset.identifiers:
+                db_dataset.identifiers.append(identifier)
     elif dataset.action == "DELETE":
-        db_dataset.identifiers = json.dumps(
-            [
-                identifier
-                for identifier in json.loads(db_dataset.identifiers)
-                if identifier not in dataset.identifiers
-            ]
-        )
+        for identifier in db_identifiers:
+            db_dataset.identifiers.remove(identifier)
     elif dataset.action == "UPDATE":
-        db_dataset.identifiers = json.dumps(dataset.identifiers)
+        db_dataset.identifiers = db_identifiers
     else:
         raise ValueError(f"Invalid action {dataset.action}")
 
@@ -1284,10 +1378,14 @@ def create_workflow(
 # TODO removed async because our current database is not able to execute async methods
 # async def queue_generate_jobs_and_add_to_workflow(
 def queue_generate_jobs_and_add_to_workflow(
-    db: Session,
     db_workflow: models.Workflow,
     json_schema_data: schemas.JsonSchemaData,
+    db=None,
 ):
+    # open separate db session if method is called with db=None, i.e. called in Thread while workflow creation
+    if db is None:
+        db = SessionLocal()
+
     conf_data = json_schema_data.conf_data
     # get variables
     single_execution = (
@@ -1332,10 +1430,9 @@ def queue_generate_jobs_and_add_to_workflow(
             dataset_name = conf_data["data_form"]["dataset_name"]
             if not db_kaapana_instance.remote:
                 db_dataset = get_dataset(db, dataset_name)
-                identifiers = json.loads(db_dataset.identifiers)
+                identifiers = [idx.id for idx in db_dataset.identifiers]
             else:
-                allowed_datasets = json.loads(db_kaapana_instance.allowed_datasets)
-                for dataset_info in allowed_datasets:
+                for dataset_info in db_kaapana_instance.allowed_datasets:
                     if dataset_info["name"] == dataset_name:
                         identifiers = (
                             dataset_info["identifiers"]
@@ -1466,8 +1563,12 @@ def update_workflow(db: Session, workflow=schemas.WorkflowUpdate):
 
     db_workflow = get_workflow(db, workflow.workflow_id)
 
-    if db_workflow.federated and workflow.workflow_status != "abort":
-        # federated workflow --> only restart orchestration job and not all jobs of workflow
+    if (
+        db_workflow.federated
+        and workflow.workflow_status != "abort"
+        and workflow.workflow_status != "confirmed"
+    ):
+        # federated workflow + workflow.workflow_status="scheduled" --> only restart orchestration job and not all jobs of workflow
         for workflow_job in db_workflow.workflow_jobs:
             if "external_schema_federated_form" in workflow_job.conf_data:
                 restart_job_id = workflow_job.id
@@ -1505,7 +1606,7 @@ def update_workflow(db: Session, workflow=schemas.WorkflowUpdate):
                     **{
                         "job_id": db_workflow_current_job.id,
                         "status": "scheduled",
-                        "description": "The worklow was triggered!",
+                        # "description": "The worklow was triggered!",
                     }
                 )
                 # def update_job() expects job of class schemas.JobUpdate
